@@ -1,4 +1,4 @@
-# MacOs-Dock
+# MacOS-Dock
 
 Turns Windows 11 into a macOS-style desktop with [Windhawk](https://windhawk.net):
 a floating glass dock with macOS icons and dot indicators, a top menu bar,
