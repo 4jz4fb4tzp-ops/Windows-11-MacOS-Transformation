@@ -5,6 +5,8 @@ a floating glass dock with macOS icons and dot indicators, a top menu bar,
 traffic-light window buttons, rounded window corners, genie minimize
 animations and macOS system icons.
 
+<img width="3072" height="1920" alt="Screenshot 2026-10-09 173246" src="https://github.com/user-attachments/assets/43fc9d7d-18f7-4ce3-a2d3-27c20dfdbdfd" />
+
 ## Folder layout
 
 The folder **must** be located at `Documents\MacOs-Dock`, because the mods load
@@ -23,6 +25,7 @@ Documents\MacOs-Dock\
     ├── Trash.cmd                  Creates the Trash shortcut for the dock
     └── Trash.ps1
 ```
+<img width="1232" height="491" alt="Screenshot 2026-10-09 173430" src="https://github.com/user-attachments/assets/9296bee7-60ef-4821-b952-16ba6466a49e" />
 
 ## Requirements
 
