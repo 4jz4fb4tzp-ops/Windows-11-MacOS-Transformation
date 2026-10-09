@@ -43,8 +43,8 @@ folder to `MacOs-Dock`. Move it to your **Documents** folder, so you get
 ### Icons
 
 Icons are **not included** because the macOS icons are copyrighted by Apple.
-Download icons you like (for example from <https://macosicons.com>) and put
-them into the `Icons` folder:
+Download icons Pack from [(for example from <https://www.reddit.com/r/MacOS/comments/1u9f8x9/macos_27_icon_pack_1024x1024_png/> and put
+them into the `Icons` folder (All Icons directly in to the `Icons` folder not in to a folder in the `Icons` folder !!!):
 
 - **PNG** files (ideally 1024×1024 with a transparent margin) for the dock
 - **ICO** files only if you want custom icons for shortcuts or the Trash
