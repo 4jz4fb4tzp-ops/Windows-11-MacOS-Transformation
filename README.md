@@ -79,7 +79,7 @@ These mods are not in the catalog. Install each one like this:
 |---|---|---|
 | `macos-dock-taskbar.wh.cpp` | **macOS Dock** | Required |
 | `top-menubar.wh.cpp` | **Top Menu Bar** | Optional |
-| `macos-traffic-lights.wh.cpp` | **macOS Traffic Lights** | Optional, experimental |
+
 
 > **Important:** Do not enable **Windows 11 Taskbar Styler** or **Taskbar height
 > and icon size** together with **macOS Dock**. macOS Dock already includes
