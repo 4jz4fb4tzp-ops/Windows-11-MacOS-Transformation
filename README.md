@@ -145,6 +145,7 @@ add an entry under *Advanced → Apps and icons* with:
 | An icon does not change | The app uses a different App ID. Use **Choose icon …** in the Dock Settings app, it detects the correct ID |
 | Taskbar looks broken after a Windows update | Disable the mod in Windhawk and wait for an update, or recompile it |
 | Settings app says "Mod settings not found" | Install the **macOS Dock** mod first (step 4) |
+| Icon not showing up | Convert Icon from .PNG to .ICO |
 
 ## License
 
