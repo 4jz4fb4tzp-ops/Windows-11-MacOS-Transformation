@@ -1,8 +1,7 @@
 # MacOS-Dock
 
 Turns Windows 11 into a macOS-style desktop with [Windhawk](https://windhawk.net):
-a floating glass dock with macOS icons and dot indicators, a top menu bar,
-traffic-light window buttons, rounded window corners, genie minimize
+a floating glass dock with macOS icons and dot indicators, a top menu bar, rounded window corners, genie minimize
 animations and macOS system icons.
 
 <img width="3072" height="1920" alt="Screenshot 2026-10-09 173246" src="https://github.com/user-attachments/assets/43fc9d7d-18f7-4ce3-a2d3-27c20dfdbdfd" />
@@ -131,6 +130,13 @@ add an entry under *Advanced → Apps and icons* with:
   separated with commas.
 - **PNG file:** a file name from the `Icons` folder.
 
+ 
+## Known issues
+
+- Multiple monitors: with two or more monitors connected, the dock can look too wide on some screens.
+- Missing icons on first start: many apps show their original Windows icon at first, because App IDs differ between PCs. Open the Dock Settings app, go to Taskbar icons and use Choose icon … for     each app (use Rescan if an app is missing from the list).
+
+  
 ## Troubleshooting
 
 | Problem | Fix |
