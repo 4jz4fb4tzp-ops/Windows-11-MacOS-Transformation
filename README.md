@@ -64,9 +64,17 @@ the settings under **Details → Settings**.
 
 | Mod | Settings |
 |---|---|
-| **Resource Redirect** | *Icon theme*: `macOS LightMode` |
+| **Resource Redirect** | *Icon theme*: `macOS Blue (by niivu)`, *Disable folder thumbnails*: on, *Redirect all loaded resources*: on |
 | **Custom Window Corner Radius** | *Corner radius*: `12`, *Small corner radius*: `6` |
 | **MacOS Minimize Animation** | Defaults are fine |
+| **Taskbar Dock Animation Plus** | *Animation curve*: `0`, *Maximum scale*: `110`, *Effect radius*: `100`, rest default |
+| **Windows 11 File Explorer Styler** | *Theme*: `Minimal Explorer11`, rest default |
+| **Taskbar Icon Separators** | Defaults are fine |
+| **Center New Windows** | Defaults are fine |
+| **Invisible Window Borders** | Defaults are fine |
+| **Monitor Rounded Edges** | Defaults are fine |
+| **Slick Window Arrangement** | Defaults are fine |
+| **Dark mode for menus** (*Dunkler Modus für Menüs*) | Defaults are fine |
 
 ## 4. Install the custom mods
 
