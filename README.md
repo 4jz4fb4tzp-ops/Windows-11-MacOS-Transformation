@@ -133,10 +133,13 @@ add an entry under *Advanced → Apps and icons* with:
  
 ## Known issues
 
-- Multiple monitors: with two or more monitors connected, the dock can look too wide on some screens.
 - Missing icons on first start: many apps show their original Windows icon at first, because App IDs differ between PCs. Open the Dock Settings app, go to Taskbar icons and use Choose icon … for     each app (use Rescan if an app is missing from the list).
 
   
+## Changelog
+
+- **Fixed:** the dock background was too wide on external monitors and Full HD screens (the icons were fine). The glass background now only spans the icons on every monitor. Copy the new `macos-dock-taskbar.wh.cpp` into the mod and click **Compile Mod**.
+
 ## Troubleshooting
 
 | Problem | Fix |

@@ -9254,8 +9254,12 @@ void ApplyDockSettings() {
                                               L"Margin=0"};
         Rule(L"Taskbar.TaskbarFrame#TaskbarFrame", frameStyles);
     }
+    // On secondary / smaller monitors Windows can give the TaskbarFrame more
+    // width than the icons need. Centering RootGrid makes it shrink to its
+    // content, so the glass background is only as wide as the icons.
     Rule(L"Taskbar.TaskbarFrame#TaskbarFrame > Grid#RootGrid",
-         {Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
+         {L"HorizontalAlignment=Center",
+          Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
               blurAmount, tintColor.c_str()),
           Fmt(L"CornerRadius=%d", cornerRadius),
           Fmt(L"Padding=%d,0,%d,0", paddingX, paddingX),
