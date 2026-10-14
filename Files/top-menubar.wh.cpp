@@ -2,7 +2,7 @@
 // @id              top-menubar
 // @name            Top Menu Bar
 // @description     macOS-style menu bar at the top of the screen with app menus, status items and Control Center
-// @version         0.29.1
+// @version         0.31.1
 // @author          Okan
 // @include         explorer.exe
 // @compilerOptions -lshell32 -lgdi32 -luser32 -lversion -lole32 -lwlanapi -liphlpapi -lcomctl32 -lcomdlg32 -ladvapi32 -ldwmapi -lgdiplus -lbthprops -luxtheme
@@ -40,7 +40,7 @@ Each item opens its own menu on click (or on hover, if enabled):
 - **Wi-Fi:** available networks, connect / disconnect
 - **Volume:** slider, mute, switch output device
 - **Bluetooth:** paired devices and their status
-- **Battery, keyboard layout, system** (CPU, RAM, drives)
+- **Battery** (fill turns green while charging, yellow in energy saver, red when low), **keyboard layout, system** (CPU, RAM, drives)
 - **Tray:** all tray icons; click, right-click and double-click are passed to the app
 - **Control Center:** tiles for Wi-Fi, Bluetooth, media playback, lock,
   screenshot, project, night light, notifications, plus sound and battery
@@ -128,7 +128,7 @@ static const TrEntry kTr[] = {
     {L"Alle Einstellungen auf Standard zurücksetzen?", L"Reset all settings to default?"},
     {L"Farben", L"Colors"}, {L"Design", L"Theme"}, {L"Schriftfarbe der Leiste", L"Bar text color"},
     {L"Hintergrundfarbe", L"Background color"}, {L"Textfarbe", L"Text color"}, {L"Höhe", L"Height"},
-    {L"Deckkraft", L"Opacity"}, {L"Skalierung (Leiste und Menüs)", L"Scaling (bar and menus)"}, {L"Schriftstärke", L"Font weight"},
+    {L"Deckkraft", L"Opacity"}, {L"Skalierung (Leiste und Menüs)", L"Scaling (bar and menus)"}, {L"Schriftstärke", L"Font weight"}, {L"Abstand der App-Menüs", L"App menu spacing"},
     {L"Dünn", L"Light"}, {L"Normal", L"Regular"}, {L"Mittel", L"Medium"}, {L"Halbfett", L"Semibold"}, {L"Fett", L"Bold"}, {L"Effekt", L"Effect"},
     {L"Blur-Stärke (nur „Blur einstellbar“)", L"Blur strength (only “Adjustable blur”)"},
     {L"Links", L"Left"}, {L"Logo anzeigen", L"Show logo"}, {L"Logo", L"Logo"},
@@ -308,6 +308,7 @@ struct Settings {
     int iconGap;          // Abstand zwischen den Symbolen (DIP)
     int scale;            // Skalierung von Leiste und Menüs in %
     int fontWeight;       // 0 = automatisch, 1 = dünn … 5 = fett
+    int menuGap;          // Abstand der App-Menüs links (DIP)
     std::wstring order;   // Reihenfolge der Module, z. B. "0,1,2,..."
     bool menuOnHover;
     bool showLogo, showAppName, showClock, showWeek;
@@ -329,19 +330,19 @@ UINT ScaledDpi(HWND h) {
 }
 
 void SetDefaults(Settings& s) {
-    s.height = 32;
-    s.bg = s.customBg = RGB(243, 243, 243);
+    s.height = 28;
+    s.bg = s.customBg = RGB(30, 30, 30);
     s.fg = s.customFg = RGB(255, 255, 255);
-    s.theme = THEME_DARK;
-    s.barText = 1;
-    s.highlightMode = 1;
-    s.highlightColor = RGB(0, 0, 0);
-    s.highlightOpacity = 5;
-    s.cardOpacity = 15;
-    s.opacity = 0;
-    s.effect = FX_NONE;
+    s.theme = THEME_SYSTEM;
+    s.barText = 0;
+    s.highlightMode = 0;
+    s.highlightColor = RGB(0, 122, 255);
+    s.highlightOpacity = 45;
+    s.cardOpacity = 35;
+    s.opacity = 70;
+    s.effect = FX_ACRYLIC;
     s.blurStrength = 12;
-    s.menuOpacity = 21;
+    s.menuOpacity = 60;
     s.menuEffect = FX_ACRYLIC;
     s.trayButton = true;
     s.customMenus = true;
@@ -349,10 +350,11 @@ void SetDefaults(Settings& s) {
     s.controlCenter = true;
     s.bluetooth = true;
     s.appMenus = true;
-    s.iconGap = 22;
-    s.scale = 88;
-    s.fontWeight = 4;
-    s.order = L"0,1,2,3,4,5,6,7,8,9,10,11,12,13,14";
+    s.iconGap = 20;
+    s.scale = 100;
+    s.fontWeight = 0;
+    s.menuGap = 18;
+    s.order = L"";
     s.menuOnHover = false;
     s.showLogo = s.showAppName = s.showClock = true;
     s.showWeek = false;
@@ -361,10 +363,9 @@ void SetDefaults(Settings& s) {
     s.wifi = s.volume = s.battery = s.batteryPercent = true;
     s.batteryTime = s.keyboard = s.netSpeed = s.cpu = s.ram = s.disk = s.uptime = false;
     s.diskDrive = L"C:";
-    s.monitor = L"all";
-    s.style = 1;
-    // 1 = circle. A custom logo image (mode 2) can be picked in the bar's settings.
-    s.logoMode = 1;
+    s.monitor = L"primary";
+    s.style = 0;
+    s.logoMode = 0;
     s.logoPath = L"";
 }
 
@@ -483,6 +484,8 @@ void Normalize() {
     if (g_s.scale < 50) g_s.scale = 50;
     if (g_s.scale > 250) g_s.scale = 250;
     if (g_s.fontWeight < 0 || g_s.fontWeight > 5) g_s.fontWeight = 0;
+    if (g_s.menuGap < 4) g_s.menuGap = 4;
+    if (g_s.menuGap > 48) g_s.menuGap = 48;
     {
         // Reihenfolge lesen, Ungültiges entfernen, fehlende Module an ihrer Standardstelle ergänzen
         std::vector<int> o;
@@ -546,6 +549,7 @@ void LoadSettings() {
         g_s.iconGap = Wh_GetIntValue(L"iconGap", g_s.iconGap);
         g_s.scale = Wh_GetIntValue(L"scale", g_s.scale);
         g_s.fontWeight = Wh_GetIntValue(L"fontWeight", g_s.fontWeight);
+        g_s.menuGap = Wh_GetIntValue(L"menuGap", g_s.menuGap);
         g_s.style = Wh_GetIntValue(L"style", 0);
         g_s.logoMode = Wh_GetIntValue(L"logoMode", 0);
     }
@@ -579,6 +583,7 @@ void SaveSettings() {
     Wh_SetIntValue(L"iconGap", g_s.iconGap);
     Wh_SetIntValue(L"scale", g_s.scale);
     Wh_SetIntValue(L"fontWeight", g_s.fontWeight);
+    Wh_SetIntValue(L"menuGap", g_s.menuGap);
     Wh_SetIntValue(L"style", g_s.style);
     Wh_SetIntValue(L"logoMode", g_s.logoMode);
     Wh_SetIntValue(L"saved", 1);
@@ -599,6 +604,7 @@ struct Status {
     int battery = 0;
     bool charging = false;
     DWORD batteryTime = (DWORD)-1;
+    bool saver = false;  // Energiesparmodus aktiv
     bool wifi = false;
     int signal = 0;
     bool online = false;
@@ -1158,6 +1164,7 @@ void UpdateStatus() {
             g_st.battery = sps.BatteryLifePercent <= 100 ? sps.BatteryLifePercent : 0;
             g_st.charging = sps.ACLineStatus == 1;
             g_st.batteryTime = sps.BatteryLifeTime;
+            g_st.saver = sps.SystemStatusFlag != 0;
         }
     }
 
@@ -1685,7 +1692,7 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
     }
 
     // ---- Links: Logo ----
-    int leftX = pad;
+    int leftX = MulDiv(g_s.menuGap, dpi, 96);  // Abstand linker Rand → Logo (gleicher Regler)
     g_cur->startRect = {};
     if (g_s.showLogo) {
         int logo = MulDiv(12, dpi, 96);
@@ -1723,8 +1730,9 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
             DeleteObject(fgBr);
         }
         // gleicher Abstand links und rechts → Hervorhebung zentriert
-        g_cur->startRect = {leftX - pad / 2, 0, leftX + logo + pad / 2, rc.bottom};
-        leftX = g_cur->startRect.right + pad / 2;
+        int hp = leftX < pad / 2 ? leftX : pad / 2;  // Hervorhebung bleibt zentriert
+        g_cur->startRect = {leftX - hp, 0, leftX + logo + hp, rc.bottom};
+        leftX = leftX + logo + MulDiv(g_s.menuGap, dpi, 96);  // Abstand Logo → App-Name
     }
 
     // ---- Rechts: Module von rechts nach links ----
@@ -1822,7 +1830,10 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
         case M_BATTERY: {
             if (g_s.battery && g_st.hasBattery) {
                 module(ACT_BATTERY, [&] {
-                    COLORREF col = (!g_st.charging && g_st.battery <= 20) ? RGB(255, 69, 58) : g_s.fg;
+                    // Füllung: grün = lädt, gelb = Energiesparmodus, rot = fast leer
+                    COLORREF col = g_st.charging ? RGB(48, 209, 88)
+                                 : g_st.saver ? RGB(255, 204, 0)
+                                 : g_st.battery <= 20 ? RGB(255, 69, 58) : g_s.fg;
                     if (mac) {
                         drawShape(27, [&](float lx) {
                             IconBattery(mem, lx, cy, sc, g_st.battery, g_st.charging, g_s.fg, col, g_s.bg);
@@ -1977,13 +1988,13 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
             DrawTextW(mem, g_appName.c_str(), -1, &ar,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             g_cur->hits.push_back({leftX - pad / 2, leftX + tw + pad / 2, ACT_APP});
-            menuX = leftX + tw + MulDiv(18, dpi, 96);
+            menuX = leftX + tw + MulDiv(g_s.menuGap, dpi, 96);
         }
     }
 
     // App-Menüs (Datei, Bearbeiten, …) neben dem App-Namen
     if (g_s.appMenus && g_s.customMenus) {
-        int gap = MulDiv(18, dpi, 96);
+        int gap = MulDiv(g_s.menuGap, dpi, 96);
         for (size_t i = 0; i < g_appMenuTitles.size(); i++) {
             std::wstring t = T(g_appMenuTitles[i]);
             int tw = textW(t, g_font);
@@ -2162,7 +2173,7 @@ void Commit() {
 enum { ID_HEIGHT = 101, ID_OPACITY, ID_BG, ID_FG, ID_EFFECT, ID_RESET, ID_CLOSE, ID_BLUR,
        ID_MENUOPACITY, ID_MENUEFFECT, ID_THEME, ID_BARTEXT, ID_HLMODE, ID_HLCOLOR, ID_HLOPACITY,
        ID_CARDOPACITY, ID_MONITOR, ID_STYLE, ID_LOGOMODE, ID_LOGOBROWSE, ID_GAP, ID_ORDERLIST,
-       ID_ORDERUP, ID_ORDERDOWN, ID_ORDERRESET, ID_SCALE, ID_FONTWEIGHT };
+       ID_ORDERUP, ID_ORDERDOWN, ID_ORDERRESET, ID_SCALE, ID_FONTWEIGHT, ID_MENUGAP };
 
 #define WM_SETTINGS_REBUILD (WM_APP + 10)
 
@@ -2250,6 +2261,7 @@ void DefineUi() {
     AddUi(2, UI_EDITBROWSE, L"Eigenes Logo (Bilddatei)", 304);
     AddUi(2, UI_TOGGLE, L"Name der aktiven App", 202);
     AddUi(2, UI_TOGGLE, L"App-Menüs (Datei, Bearbeiten …)", 227);
+    AddUi(2, UI_SLIDER, L"Abstand der App-Menüs", ID_MENUGAP);
     AddUi(2, UI_SECTION, L"Rechts");
     AddUi(2, UI_COMBO, L"Symbol-Stil", ID_STYLE);
     AddUi(2, UI_SLIDER, L"Abstand zwischen den Symbolen", ID_GAP);
@@ -2368,6 +2380,7 @@ void SliderRange(int id, int& mn, int& mx) {
     case ID_SCALE: mn = 75; mx = 200; break;
     case ID_BLUR: mn = 0; mx = 40; break;
     case ID_GAP: mn = 4; mx = 48; break;
+    case ID_MENUGAP: mn = 4; mx = 48; break;
     case ID_HLOPACITY: mn = 5; mx = 100; break;
     default: mn = 0; mx = 100; break;
     }
@@ -2380,6 +2393,7 @@ int* SliderField(int id) {
     case ID_OPACITY: return &g_s.opacity;
     case ID_BLUR: return &g_s.blurStrength;
     case ID_GAP: return &g_s.iconGap;
+    case ID_MENUGAP: return &g_s.menuGap;
     case ID_MENUOPACITY: return &g_s.menuOpacity;
     case ID_HLOPACITY: return &g_s.highlightOpacity;
     case ID_CARDOPACITY: return &g_s.cardOpacity;
@@ -2391,7 +2405,7 @@ std::wstring SliderText(int id) {
     int* f = SliderField(id);
     if (!f) return L"";
     wchar_t b[32];
-    if (id == ID_HEIGHT || id == ID_GAP) swprintf(b, 32, L"%d px", *f);
+    if (id == ID_HEIGHT || id == ID_GAP || id == ID_MENUGAP) swprintf(b, 32, L"%d px", *f);
     else if (id == ID_BLUR) swprintf(b, 32, L"%d", *f);
     else swprintf(b, 32, L"%d %%", *f);
     return b;
