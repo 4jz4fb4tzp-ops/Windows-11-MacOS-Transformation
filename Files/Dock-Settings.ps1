@@ -61,12 +61,18 @@ $NumberDefs = @(
     @{K='dotOffset';      L='Dot offset (+ = lower)';      Min=-8;  Max=10;  G='Indicator'; D=1}
 )
 $TextDefs = @(
-    @{K='tintColor';         L='Tint (#AARRGGBB)';           D='#10FFFFFF'}
-    @{K='edgeColor';         L='Edge highlight (#AARRGGBB)';       D='#90FFFFFF'}
+    @{K='tintColor';         L='Tint, light mode (#AARRGGBB)'; D='#10FFFFFF'}
+    @{K='edgeColor';         L='Edge highlight, light mode (#AARRGGBB)'; D='#90FFFFFF'}
+    @{K='darkTintColor';     L='Tint, dark mode (#AARRGGBB)'; D='#80202020'}
+    @{K='darkEdgeColor';     L='Edge highlight, dark mode (#AARRGGBB)'; D='#50FFFFFF'}
     @{K='dotActiveColor';    L='Dot active';                  D='#FFFFFFFF'}
     @{K='dotInactiveColor';  L='Dot background app';        D='#B0FFFFFF'}
     @{K='dotAttentionColor'; L='Dot attention';         D='#FFFF9F0A'}
     @{K='iconFolder';        L='Icon folder';                  D='%USERPROFILE%\Documents\MacOs-Dock\Icons'}
+)
+# Choices: key, label, default, options (value, label)
+$ChoiceDefs = @(
+    @{K='appearance'; L='Appearance'; D='auto'; O=@(@('auto','Follow Windows'), @('light','Light'), @('dark','Dark'))}
 )
 $BoolDefs = @(
     @{K='autoTaskbarHeight';   L='Fit taskbar height to dock (no gap above maximized windows)'; D=1}
@@ -85,7 +91,7 @@ function Open-SettingsKey([bool]$write) {
 function Read-State {
     $s = @{ scale = 120; apps = New-Object System.Collections.ArrayList }
     foreach ($d in $NumberDefs) { $s[$d.K] = $d.D }
-    foreach ($d in $TextDefs)   { $s[$d.K] = $d.D }
+    foreach ($d in $TextDefs + $ChoiceDefs) { $s[$d.K] = $d.D }
     foreach ($d in $BoolDefs)   { $s[$d.K] = $d.D }
 
     $key = Open-SettingsKey $false
@@ -93,7 +99,7 @@ function Read-State {
         try {
             $v = $key.GetValue('scale'); if ($v -ne $null) { $s.scale = [int]$v }
             foreach ($d in $NumberDefs + $BoolDefs) { $v = $key.GetValue($d.K); if ($v -ne $null) { $s[$d.K] = [int]$v } }
-            foreach ($d in $TextDefs) { $v = $key.GetValue($d.K); if ($v -ne $null) { $s[$d.K] = [string]$v } }
+            foreach ($d in $TextDefs + $ChoiceDefs) { $v = $key.GetValue($d.K); if ($v -ne $null) { $s[$d.K] = [string]$v } }
             for ($i = 0; $i -lt 200; $i++) {
                 $n = $key.GetValue("apps[$i].name"); $ids = $key.GetValue("apps[$i].ids"); $f = $key.GetValue("apps[$i].file")
                 if ($n -eq $null -and $ids -eq $null -and $f -eq $null) { break }
@@ -109,7 +115,10 @@ function Write-State($s) {
     try {
         $key.SetValue('scale', [int]$s.scale, [Microsoft.Win32.RegistryValueKind]::DWord)
         foreach ($d in $NumberDefs + $BoolDefs) { $key.SetValue($d.K, [int]$s[$d.K], [Microsoft.Win32.RegistryValueKind]::DWord) }
-        foreach ($d in $TextDefs) { $key.SetValue($d.K, [string]$s[$d.K], [Microsoft.Win32.RegistryValueKind]::String) }
+        foreach ($d in $TextDefs + $ChoiceDefs) {
+            $v = $s[$d.K]; if ($v -eq $null) { $v = $d.D }
+            $key.SetValue($d.K, [string]$v, [Microsoft.Win32.RegistryValueKind]::String)
+        }
 
         foreach ($name in $key.GetValueNames()) { if ($name -like 'apps`[*') { $key.DeleteValue($name) } }
         $i = 0
@@ -329,6 +338,33 @@ function Update-ColorUI([string]$key) {
     $c.Hex.Text = $state[$key]
 }
 
+Add-Header 'Appearance'
+foreach ($d in $ChoiceDefs) {
+    $row = New-Row $d.L
+    $combo = New-Object System.Windows.Controls.ComboBox
+    $combo.FontWeight = 'Normal'; $combo.Margin = '8,0,0,0'
+    [System.Windows.Controls.Grid]::SetColumn($combo, 1); [System.Windows.Controls.Grid]::SetColumnSpan($combo, 2)
+    foreach ($o in $d.O) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = $o[1]; $item.Tag = $o[0]
+        [void]$combo.Items.Add($item)
+    }
+    $combo.Tag = $d.K
+    $combo.Add_SelectionChanged({
+        param($sender, $e)
+        if ($script:loading -or -not $sender.SelectedItem) { return }
+        $state[$sender.Tag] = [string]$sender.SelectedItem.Tag
+        Request-Save
+    })
+    [void]$row.Children.Add($combo)
+    [void]$ui.AdvPanel.Children.Add($row)
+    $controls[$d.K] = $combo
+}
+$appearanceHint = New-Object System.Windows.Controls.TextBlock
+$appearanceHint.Text = 'Light mode uses the light colors below, dark mode the dark ones. "Follow Windows" switches automatically.'
+$appearanceHint.TextWrapping = 'Wrap'; $appearanceHint.FontWeight = 'Normal'; $appearanceHint.Foreground = '#5D6675'; $appearanceHint.Margin = '0,2,0,4'
+[void]$ui.AdvPanel.Children.Add($appearanceHint)
+
 Add-Header 'Colors'
 foreach ($d in ($TextDefs | Where-Object { $_.K -like '*Color' })) {
     $row = New-Row ($d.L -replace '\s*\(#AARRGGBB\)', '')
@@ -455,6 +491,12 @@ function Show-State {
     foreach ($d in $NumberDefs) { $controls[$d.K].Value = [int]$state[$d.K]; $controls[$d.K].Tag.Label.Text = "$([int]$state[$d.K]) px" }
     foreach ($d in $TextDefs) { if ($d.K -like '*Color') { Update-ColorUI $d.K } else { $controls[$d.K].Text = [string]$state[$d.K] } }
     foreach ($d in $BoolDefs) { $controls[$d.K].IsChecked = [bool][int]$state[$d.K] }
+    foreach ($d in $ChoiceDefs) {
+        $v = [string]$state[$d.K]; if (-not $v) { $v = $d.D; $state[$d.K] = $v }
+        $combo = $controls[$d.K]
+        $combo.SelectedItem = $null
+        foreach ($item in $combo.Items) { if ([string]$item.Tag -eq $v) { $combo.SelectedItem = $item } }
+    }
     $list = New-Object 'System.Collections.ObjectModel.ObservableCollection[MacDock.AppEntry]'
     foreach ($a in $state.apps) { $list.Add($a) }
     $state.apps = $list

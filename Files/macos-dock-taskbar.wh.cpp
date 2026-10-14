@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.0
+// @version         1.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -95,10 +95,23 @@ code from the **TranslucentTB** project.
 - blurAmount: 8
   $name: Dock – blur amount
   $description: 0 = no blur, 4 = light, 15 = strong
+- appearance: auto
+  $name: Dock – appearance
+  $description: >-
+    Light or dark dock. "Follow Windows" switches automatically with the
+    Windows mode (Settings → Personalization → Colors).
+  $options:
+  - auto: Follow Windows
+  - light: Light
+  - dark: Dark
 - tintColor: "#10FFFFFF"
-  $name: Dock – tint (#AARRGGBB)
+  $name: Dock – tint, light mode (#AARRGGBB)
 - edgeColor: "#90FFFFFF"
-  $name: Dock – top edge highlight (#AARRGGBB)
+  $name: Dock – top edge highlight, light mode (#AARRGGBB)
+- darkTintColor: "#80202020"
+  $name: Dock – tint, dark mode (#AARRGGBB)
+- darkEdgeColor: "#50FFFFFF"
+  $name: Dock – top edge highlight, dark mode (#AARRGGBB)
 - buttonWidth: 44
   $name: Icons – space per icon (px)
 - iconSize: 38
@@ -9123,6 +9136,31 @@ int GetInt(const std::wstring& key) {
     return Wh_GetIntSetting(key.c_str());
 }
 
+// True if the Windows taskbar/system uses dark mode.
+bool IsWindowsDarkMode() {
+    DWORD value = 1, size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr,
+                     &value, &size) != ERROR_SUCCESS) {
+        return false;
+    }
+    return value == 0;
+}
+
+// Resolves the "appearance" setting to light (false) or dark (true).
+bool IsDarkAppearance() {
+    std::wstring appearance = GetStr(L"appearance");
+    if (appearance == L"dark") return true;
+    if (appearance == L"light") return false;
+    return IsWindowsDarkMode();
+}
+
+bool IsAppearanceAuto() {
+    std::wstring appearance = GetStr(L"appearance");
+    return appearance != L"dark" && appearance != L"light";
+}
+
 int GetScale() {
     int scale = Wh_GetIntSetting(L"scale");
     return scale > 0 ? scale : 100;
@@ -9215,8 +9253,9 @@ void ApplyDockSettings() {
     int paddingX = GetPx(L"paddingX");
     int dockBottom = GetPx(L"dockBottom");
     int blurAmount = GetInt(L"blurAmount");
-    std::wstring tintColor = GetStr(L"tintColor");
-    std::wstring edgeColor = GetStr(L"edgeColor");
+    bool darkMode = IsDarkAppearance();
+    std::wstring tintColor = GetStr(darkMode ? L"darkTintColor" : L"tintColor");
+    std::wstring edgeColor = GetStr(darkMode ? L"darkEdgeColor" : L"edgeColor");
     int buttonWidth = GetPx(L"buttonWidth");
     int iconSize = GetPx(L"iconSize");
     int iconOffsetY = GetPx(L"iconOffsetY");
@@ -9238,8 +9277,8 @@ void ApplyDockSettings() {
         }
     }
 
-    if (tintColor.empty()) tintColor = L"#10FFFFFF";
-    if (edgeColor.empty()) edgeColor = L"#90FFFFFF";
+    if (tintColor.empty()) tintColor = darkMode ? L"#80202020" : L"#10FFFFFF";
+    if (edgeColor.empty()) edgeColor = darkMode ? L"#50FFFFFF" : L"#90FFFFFF";
     if (dotActive.empty()) dotActive = L"#FFFFFFFF";
     if (dotInactive.empty()) dotInactive = L"#B0FFFFFF";
     if (dotAttention.empty()) dotAttention = L"#FFFF9F0A";
@@ -13312,6 +13351,78 @@ void LoadSettings() {
     Wh_FreeStringSetting(xamlDiagnosticsHandling);
 }
 
+std::mutex g_reloadMutex;
+
+// Rebuilds all styles from the current settings. Used when the mod settings
+// change and when the Windows light/dark mode changes.
+void ReloadDock(bool settingsChanged);
+
+// ---------------------------------------------------------------------------
+// Watches the Windows light/dark mode and re-applies the dock colors when it
+// changes while "appearance" is set to "Follow Windows".
+// ---------------------------------------------------------------------------
+HANDLE g_themeWatchThread;
+HANDLE g_themeWatchStopEvent;
+
+DWORD WINAPI ThemeWatchThread(LPVOID) {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      0, KEY_NOTIFY | KEY_QUERY_VALUE,
+                      &key) != ERROR_SUCCESS) {
+        Wh_Log(L"Theme watch: can't open Personalize key");
+        return 0;
+    }
+
+    HANDLE changeEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    bool lastDark = macdock::IsWindowsDarkMode();
+
+    while (true) {
+        if (RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
+                                    changeEvent, TRUE) != ERROR_SUCCESS) {
+            break;
+        }
+
+        HANDLE handles[] = {g_themeWatchStopEvent, changeEvent};
+        DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (wait != WAIT_OBJECT_0 + 1) {
+            break;
+        }
+
+        bool dark = macdock::IsWindowsDarkMode();
+        if (dark == lastDark) {
+            continue;
+        }
+        lastDark = dark;
+
+        if (macdock::IsAppearanceAuto()) {
+            Wh_Log(L"Windows switched to %s mode", dark ? L"dark" : L"light");
+            ReloadDock(false);
+        }
+    }
+
+    CloseHandle(changeEvent);
+    RegCloseKey(key);
+    return 0;
+}
+
+void StartThemeWatch() {
+    if (g_themeWatchThread) return;
+    g_themeWatchStopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    g_themeWatchThread =
+        CreateThread(nullptr, 0, ThemeWatchThread, nullptr, 0, nullptr);
+}
+
+void StopThemeWatch() {
+    if (!g_themeWatchThread) return;
+    SetEvent(g_themeWatchStopEvent);
+    WaitForSingleObject(g_themeWatchThread, INFINITE);
+    CloseHandle(g_themeWatchThread);
+    CloseHandle(g_themeWatchStopEvent);
+    g_themeWatchThread = nullptr;
+    g_themeWatchStopEvent = nullptr;
+}
+
 BOOL Wh_ModInit() {
     Wh_Log(L">");
 
@@ -13396,6 +13507,8 @@ void Wh_ModAfterInit() {
     if (initialize) {
         InitializeSettingsAndTap();
     }
+
+    StartThemeWatch();
 }
 
 void Wh_ModBeforeUninit() {
@@ -13406,6 +13519,8 @@ void Wh_ModBeforeUninit() {
 
 void Wh_ModUninit() {
     Wh_Log(L">");
+
+    StopThemeWatch();
 
     taskbarheight::Uninit();
 
@@ -13449,7 +13564,15 @@ void Wh_ModUninit() {
 void Wh_ModSettingsChanged() {
     Wh_Log(L">");
 
-    taskbarheight::SettingsChanged();
+    ReloadDock(true);
+}
+
+void ReloadDock(bool settingsChanged) {
+    std::lock_guard<std::mutex> lock(g_reloadMutex);
+
+    if (settingsChanged) {
+        taskbarheight::SettingsChanged();
+    }
 
     UninitializeSettingsAndTap();
 

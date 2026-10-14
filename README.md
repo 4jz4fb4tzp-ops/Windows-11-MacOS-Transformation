@@ -150,6 +150,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **New (macOS Dock 1.1):** light and dark mode for the dock. In the Dock Settings app under *Advanced → Appearance* choose **Follow Windows**, **Light** or **Dark**. "Follow Windows" switches automatically with the Windows mode. Both modes have their own tint and edge colors.
 - **Fixed:** the dock background was too wide on external monitors and Full HD screens (the icons were fine). The glass background now only spans the icons on every monitor. Copy the new `macos-dock-taskbar.wh.cpp` into the mod and click **Compile Mod**.
 
 ## Troubleshooting
