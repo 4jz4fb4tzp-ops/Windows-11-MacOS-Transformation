@@ -19,6 +19,8 @@ Documents\MacOs-Dock\
     ├── macos-dock-taskbar.wh.cpp  Windhawk mod: macOS Dock
     ├── top-menubar.wh.cpp         Windhawk mod: Top Menu Bar
     ├── macos-traffic-lights.wh.cpp Windhawk mod: macOS Traffic Lights
+    ├── three-finger-drag.wh.cpp   Windhawk mod: Three Finger Drag
+    ├── turbo-boost-tray-toggle.wh.cpp Windhawk mod: Turbo Boost Tray Toggle
     ├── Dock-Settings.cmd          Starts the Dock Settings app
     ├── Dock-Settings.ps1          Dock Settings app
     ├── Trash.cmd                  Creates the Trash shortcut for the dock
@@ -89,6 +91,8 @@ These mods are not in the catalog. Install each one like this:
 |---|---|---|
 | `macos-dock-taskbar.wh.cpp` | **macOS Dock** | Required |
 | `top-menubar.wh.cpp` | **Top Menu Bar** | Optional |
+| `three-finger-drag.wh.cpp` | **Three Finger Drag (macOS-Style)** | Optional, drag with three fingers on a Precision Touchpad (laptops only) |
+| `turbo-boost-tray-toggle.wh.cpp` | **Turbo Boost Tray Toggle** | Optional, tray icon to turn CPU Turbo Boost on/off |
 
 
 > **Important:** Do not enable **Windows 11 Taskbar Styler** or **Taskbar height
