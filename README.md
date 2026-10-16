@@ -14,6 +14,8 @@ the icons from there.
 ```
 Documents\MacOs-Dock\
 ├── README.md
+├── Setup.cmd                      One-click setup
+├── setup\                         Setup script and mod list (mods.json)
 ├── Icons\                         put your icons here (not included, see below)
 └── Files\
     ├── macos-dock-taskbar.wh.cpp  Windhawk mod: macOS Dock
@@ -27,6 +29,31 @@ Documents\MacOs-Dock\
     └── Trash.ps1
 ```
 <img width="1232" height="491" alt="Screenshot 2026-10-09 173430" src="https://github.com/user-attachments/assets/9296bee7-60ef-4821-b952-16ba6466a49e" />
+
+## Quick install (recommended)
+
+1. Download this repository (**Code → Download ZIP**) and extract it anywhere.
+2. Optional: download a macOS icon pack (see [Icons](#icons)).
+3. Double-click **`Setup.cmd`** and confirm the admin prompt.
+
+The setup does everything else automatically:
+
+- installs **Windhawk** if it isn't installed yet
+- copies the project to `Documents\MacOs-Dock` and imports your icon pack
+  (drag the ZIP into the setup window when it asks)
+- installs all catalog mods listed below with the recommended settings
+- compiles and installs the custom mods (macOS Dock, Top Menu Bar, and
+  optionally Three Finger Drag and Turbo Boost Tray Toggle)
+- disables mods that conflict with the dock, centers the taskbar and hides
+  search, task view and widgets
+- creates the Trash shortcut and restarts Windhawk and Explorer
+
+Compiling the custom mods takes a few minutes. Mods that are already installed
+keep their settings; run `Setup.cmd -ResetSettings` to apply the recommended
+settings again. After the setup, pin `Files\Trash.lnk` to the taskbar and use
+the Dock Settings app to assign icons.
+
+The manual steps below do the same by hand.
 
 ## Requirements
 
@@ -150,6 +177,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **New:** one-click setup (`Setup.cmd`) that installs Windhawk, all mods and settings automatically.
 - **New (macOS Dock 1.1):** light and dark mode for the dock. In the Dock Settings app under *Advanced → Appearance* choose **Follow Windows**, **Light** or **Dark**. "Follow Windows" switches automatically with the Windows mode. Both modes have their own tint and edge colors.
 - **Fixed:** the dock background was too wide on external monitors and Full HD screens (the icons were fine). The glass background now only spans the icons on every monitor. Copy the new `macos-dock-taskbar.wh.cpp` into the mod and click **Compile Mod**.
 

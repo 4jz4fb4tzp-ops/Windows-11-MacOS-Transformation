@@ -1,0 +1,396 @@
+{
+  "mods": [
+    {
+      "id": "icon-resource-redirect",
+      "name": "Resource Redirect",
+      "version": "1.3",
+      "include": [
+        "*"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lcomctl32 -lgdi32 -lole32 -loleaut32",
+      "settings": {
+        "iconTheme": "macOS Blue|themes/icons/niivu/macOS%20blue.zip",
+        "disableThumbnails": 1,
+        "allResourceRedirect": 1,
+        "themePaths[0]": "",
+        "redirectionResourcePaths[0].original": "",
+        "redirectionResourcePaths[0].redirect": "",
+        "themeFolder": ""
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "custom-corner-radius",
+      "name": "Custom Window Corner Radius",
+      "version": "1.3",
+      "include": [
+        "dwm.exe"
+      ],
+      "exclude": [],
+      "architecture": [
+        "x86-64"
+      ],
+      "compilerOptions": "-lgdi32 -lwevtapi",
+      "settings": {
+        "radius": 12,
+        "smallRadius": 6,
+        "tooltipRadius": -1,
+        "roundMaximizedAndSnapped": "none"
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "macos-minimize-animation",
+      "name": "MacOS Minimize Animation",
+      "version": "3.1.6",
+      "include": [
+        "*"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-ldwmapi -lgdi32 -ld2d1 -lole32 -loleaut32 -luuid -lshell32",
+      "settings": {
+        "duration_ms": 450,
+        "open_animation": 1,
+        "launch_animation": 0,
+        "multi_monitor": 0,
+        "unhide_taskbar": 1,
+        "unhide_duration_ms": 450,
+        "engine": "modern",
+        "tile_count": 35,
+        "excluded_programs[0]": ""
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "taskbar-dock-animation-plus",
+      "name": "Taskbar Dock Animation Plus",
+      "version": "2.0.1",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [
+        "x86-64"
+      ],
+      "compilerOptions": "-lole32 -loleaut32 -lruntimeobject -lshcore -lwindowsapp -luser32",
+      "settings": {
+        "AnimationType": 0,
+        "MaxScale": 110,
+        "EffectRadius": 100,
+        "SpacingFactor": 50,
+        "BounceDelay": 500,
+        "FocusDuration": 150,
+        "DisableVerticalBounce": 0,
+        "TaskbarLabelsMode": 0,
+        "ExcludeSystemButtonsMode": 0,
+        "LerpSpeed": 60,
+        "DisableBounce": 0
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "windows-11-file-explorer-styler",
+      "name": "Windows 11 File Explorer Styler",
+      "version": "1.7",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [
+        "x86-64"
+      ],
+      "compilerOptions": "-lcomctl32 -ld2d1 -ldwmapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -lruntimeobject -lshlwapi -luxtheme",
+      "settings": {
+        "theme": "Minimal Explorer11",
+        "backgroundTranslucentEffect": "",
+        "backgroundTranslucentEffectRegion": "",
+        "styleConstants[0]": "",
+        "controlStyles[0].target": "",
+        "controlStyles[0].styles[0]": "",
+        "themeResourceVariables[0]": "",
+        "explorerFrameContainerHeight": 0,
+        "xamlDiagnosticsHandling": "alert"
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "taskbar-icon-separators",
+      "name": "Taskbar Icon Separators",
+      "version": "1.0.33",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [
+        "x86-64"
+      ],
+      "compilerOptions": "-lole32 -loleaut32 -lruntimeobject -luuid -lshell32 -lpropsys -lshlwapi -lwindowscodecs",
+      "settings": {
+        "width": 20,
+        "interactionMode": "contextMenu",
+        "iconRotation": 0,
+        "iconBrightness": 168,
+        "iconAlpha": 173,
+        "customIcon": ""
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "center-new-windows",
+      "name": "Center New Windows",
+      "version": "1.0.1",
+      "include": [
+        "*"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-luser32 -ldwmapi",
+      "settings": {
+        "fadeTrickEnabled": 0,
+        "fadeDelayMs": 25,
+        "resizeEnabled": 0,
+        "resizeWidth": 1024,
+        "resizeHeight": 768,
+        "centerDialogs": 0,
+        "centerUWP": 1,
+        "centerOffsetY": 0,
+        "excludeClasses[0]": "",
+        "excludeProcesses[0]": ""
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "invisible-borders",
+      "name": "Invisible Window Borders",
+      "version": "1.0.0",
+      "include": [
+        "*"
+      ],
+      "exclude": [
+        "devenv.exe"
+      ],
+      "architecture": [],
+      "compilerOptions": "-ldwmapi -luser32",
+      "settings": {
+        "SpecialWindows": 0
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "monitor-rounded-edges",
+      "name": "Monitor Rounded Edges",
+      "version": "1.0",
+      "include": [
+        "windhawk.exe"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lUser32 -lGdi32 -ld2d1 -lShell32 -lOle32",
+      "settings": {
+        "radius": 10,
+        "squircle": 0,
+        "color": "#000000",
+        "border_thickness": 1,
+        "border_color": "#33FFFFFF",
+        "dynamic_border": 0,
+        "disable_fullscreen": 1
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "slick-window-arrangement",
+      "name": "Slick Window Arrangement",
+      "version": "1.0.2",
+      "include": [
+        "*"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lcomctl32 -ldwmapi",
+      "settings": {
+        "SnapWindowsWhenDragging": 1,
+        "SnapWindowsDistance": 25,
+        "KeysToDisableSnapping.Ctrl": 0,
+        "KeysToDisableSnapping.Alt": 1,
+        "KeysToDisableSnapping.Shift": 0,
+        "SlidingAnimation": 1,
+        "SnapWindowsWhenSliding": 1,
+        "SlidingAnimationSlowdown": 15
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "dark-menus",
+      "name": "Dark mode context menus",
+      "version": "1.4.2",
+      "include": [
+        "*"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lUxTheme -lGdi32 -lNtDll",
+      "settings": {
+        "AppMode": "ForceDark",
+        "TranslucentFlyoutsFix": 0
+      },
+      "source": "catalog"
+    },
+    {
+      "id": "macos-dock-taskbar",
+      "name": "macOS Dock",
+      "version": "1.1",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [
+        "x86-64"
+      ],
+      "compilerOptions": "-lcomctl32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshcore -lversion",
+      "settings": {
+        "scale": 120,
+        "autoTaskbarHeight": 1,
+        "taskbarHeight": 60,
+        "dockHeight": 52,
+        "cornerRadius": 17,
+        "paddingX": 3,
+        "dockBottom": 6,
+        "blurAmount": 8,
+        "appearance": "auto",
+        "tintColor": "#10FFFFFF",
+        "edgeColor": "#90FFFFFF",
+        "darkTintColor": "#80202020",
+        "darkEdgeColor": "#50FFFFFF",
+        "buttonWidth": 44,
+        "iconSize": 38,
+        "nativeIconSize": 29,
+        "iconOffsetY": 1,
+        "dotSize": 4,
+        "dotOffset": 1,
+        "dotActiveColor": "#FFFFFFFF",
+        "dotInactiveColor": "#B0FFFFFF",
+        "dotAttentionColor": "#FFFF9F0A",
+        "hideStart": 1,
+        "hideTray": 1,
+        "hideHover": 1,
+        "iconFolder": "%USERPROFILE%\\Documents\\MacOs-Dock\\Icons",
+        "apps[0].name": "File Explorer",
+        "apps[0].ids": "Microsoft.Windows.Explorer",
+        "apps[0].file": "finder.png",
+        "apps[1].name": "Microsoft Store",
+        "apps[1].ids": "Microsoft.WindowsStore_8wekyb3d8bbwe!App",
+        "apps[1].file": "app store.png",
+        "apps[2].name": "Settings",
+        "apps[2].ids": "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel, Microsoft.Windows.ControlPanel",
+        "apps[2].file": "system settings.png",
+        "apps[3].name": "Photos",
+        "apps[3].ids": "Microsoft.Windows.Photos_8wekyb3d8bbwe!App",
+        "apps[3].file": "photos.png",
+        "apps[4].name": "Calculator",
+        "apps[4].ids": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        "apps[4].file": "calculator.png",
+        "apps[5].name": "Notepad",
+        "apps[5].ids": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+        "apps[5].file": "textedit.png",
+        "apps[6].name": "Snipping Tool",
+        "apps[6].ids": "Microsoft.ScreenSketch_8wekyb3d8bbwe!App",
+        "apps[6].file": "screenshot.png",
+        "apps[7].name": "Clock",
+        "apps[7].ids": "Microsoft.WindowsAlarms_8wekyb3d8bbwe!App",
+        "apps[7].file": "clock.png",
+        "apps[8].name": "Media Player",
+        "apps[8].ids": "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic",
+        "apps[8].file": "music.png",
+        "apps[9].name": "Camera",
+        "apps[9].ids": "Microsoft.WindowsCamera_8wekyb3d8bbwe!App",
+        "apps[9].file": "photo booth.png",
+        "apps[10].name": "Terminal",
+        "apps[10].ids": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App, {1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\cmd.exe, C:\\Windows\\System32\\cmd.exe, {1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "apps[10].file": "terminal.png",
+        "apps[11].name": "Google Chrome",
+        "apps[11].ids": "Chrome, C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "apps[11].file": "chrome.png",
+        "apps[12].name": "Microsoft Edge",
+        "apps[12].ids": "MSEdge",
+        "apps[12].file": "safari.png",
+        "apps[13].name": "Word",
+        "apps[13].ids": "Microsoft.Office.WINWORD.EXE.15",
+        "apps[13].file": "word.png",
+        "apps[14].name": "Excel",
+        "apps[14].ids": "Microsoft.Office.EXCEL.EXE.15",
+        "apps[14].file": "excel.png",
+        "apps[15].name": "PowerPoint",
+        "apps[15].ids": "Microsoft.Office.POWERPNT.EXE.15",
+        "apps[15].file": "powerpoint.png",
+        "controlStyles[0].target": "",
+        "controlStyles[0].styles[0]": "",
+        "clickThroughTaskbar": 1,
+        "xamlDiagnosticsHandling": "alert"
+      },
+      "source": "local",
+      "file": "macos-dock-taskbar.wh.cpp",
+      "optional": false,
+      "question": null
+    },
+    {
+      "id": "top-menubar",
+      "name": "Top Menu Bar",
+      "version": "0.31.1",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lshell32 -lgdi32 -luser32 -lversion -lole32 -lwlanapi -liphlpapi -lcomctl32 -lcomdlg32 -ladvapi32 -ldwmapi -lgdiplus -lbthprops -luxtheme",
+      "settings": {},
+      "source": "local",
+      "file": "top-menubar.wh.cpp",
+      "optional": false,
+      "question": null
+    },
+    {
+      "id": "three-finger-drag",
+      "name": "Three Finger Drag (macOS-Style)",
+      "version": "1.0",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lhid",
+      "settings": {
+        "releaseDelay": 300
+      },
+      "source": "local",
+      "file": "three-finger-drag.wh.cpp",
+      "optional": true,
+      "question": "Install Three Finger Drag (laptops with a Precision Touchpad)?"
+    },
+    {
+      "id": "turbo-boost-tray-toggle",
+      "name": "Turbo Boost Tray Toggle",
+      "version": "1.1",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-lpowrprof -lshell32 -lgdi32",
+      "settings": {
+        "onMode": 2
+      },
+      "source": "local",
+      "file": "turbo-boost-tray-toggle.wh.cpp",
+      "optional": true,
+      "question": "Install Turbo Boost Tray Toggle (tray icon to turn CPU Turbo Boost on/off)?"
+    }
+  ],
+  "conflicting": [
+    "windows-11-taskbar-styler",
+    "taskbar-icon-size",
+    "taskbar-dock-animation"
+  ]
+}

@@ -1,6 +1,7 @@
 # Creates a Recycle Bin shortcut with a macOS icon and its own App ID (MacDock.Trash),
 # so the taskbar doesn't group it with File Explorer.
-$base   = Join-Path $env:USERPROFILE "Documents\MacOs-Dock"
+param([switch]$NoPause)
+$base   = Join-Path ([Environment]::GetFolderPath('MyDocuments')) "MacOs-Dock"
 $lnk    = Join-Path $base "Files\Trash.lnk"
 $icon   = Join-Path $base "Icons\trash (empty).ico"
 
@@ -62,4 +63,4 @@ Write-Host "Done: $lnk"
 Write-Host "Now right-click Trash.lnk -> Show more options -> Pin to taskbar"
 # Open the folder with Trash.lnk selected
 Start-Process explorer.exe "/select,`"$lnk`""
-Read-Host "Press Enter to close"
+if (-not $NoPause) { Read-Host "Press Enter to close" }
