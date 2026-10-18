@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.1
+// @version         1.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -29,6 +29,8 @@ be adjusted in the **Settings** tab:
 * **Indicator:** dot size, position and colors for active, background and
   attention states
 * **Elements:** hide the Start button, system tray and hover background
+* **Position:** follows the Windows taskbar position (bottom, left or right,
+  under Settings → Personalization → Taskbar → Taskbar behaviors)
 * **Apps:** one or more App IDs per app and a PNG file from the icon folder
 
 **Important:** Disable the *Windows 11 Taskbar Styler* and *Taskbar height and
@@ -53,6 +55,8 @@ contains common Windows apps; adjust the file names to your icons.
   individual values.
 * The taskbar height and the size of icons without a custom PNG are fully
   applied after restarting Explorer.
+* After moving the taskbar to another side, restart Explorer once so the dock
+  switches its layout.
 
 Colors use the `#AARRGGBB` format (AA = opacity).
 
@@ -9156,6 +9160,17 @@ bool IsDarkAppearance() {
     return IsWindowsDarkMode();
 }
 
+// Screen edge of the taskbar: ABE_BOTTOM, ABE_LEFT, ABE_RIGHT or ABE_TOP.
+UINT GetTaskbarEdge() {
+    APPBARDATA appBarData = {
+        .cbSize = sizeof(APPBARDATA),
+    };
+    if (!SHAppBarMessage(ABM_GETTASKBARPOS, &appBarData)) {
+        return ABE_BOTTOM;
+    }
+    return appBarData.uEdge;
+}
+
 bool IsAppearanceAuto() {
     std::wstring appearance = GetStr(L"appearance");
     return appearance != L"dark" && appearance != L"light";
@@ -9288,31 +9303,50 @@ void ApplyDockSettings() {
          {L"Fill=Transparent"});
     Rule(L"Taskbar.TaskbarFrame > Grid#RootGrid > Taskbar.TaskbarBackground > Grid > Rectangle#BackgroundStroke",
          {L"Fill=Transparent"});
+    // Taskbar on the left or right: the dock runs vertically and the dots
+    // sit on the screen-edge side of the icons, like on macOS.
+    UINT edge = GetTaskbarEdge();
+    bool vertical = edge == ABE_LEFT || edge == ABE_RIGHT;
+    bool rightEdge = edge == ABE_RIGHT;
+
     {
-        std::vector<std::wstring> frameStyles{L"HorizontalAlignment=Center",
-                                              L"Margin=0"};
+        std::vector<std::wstring> frameStyles{
+            vertical ? L"VerticalAlignment=Center" : L"HorizontalAlignment=Center",
+            L"Margin=0"};
         Rule(L"Taskbar.TaskbarFrame#TaskbarFrame", frameStyles);
     }
     // On secondary / smaller monitors Windows can give the TaskbarFrame more
     // width than the icons need. Centering RootGrid makes it shrink to its
     // content, so the glass background is only as wide as the icons.
-    Rule(L"Taskbar.TaskbarFrame#TaskbarFrame > Grid#RootGrid",
-         {L"HorizontalAlignment=Center",
-          Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
-              blurAmount, tintColor.c_str()),
-          Fmt(L"CornerRadius=%d", cornerRadius),
-          Fmt(L"Padding=%d,0,%d,0", paddingX, paddingX),
-          L"BorderThickness=1",
-          Fmt(L"BorderBrush:=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\">"
-              L"<GradientStop Color=\"%s\" Offset=\"0\" />"
-              L"<GradientStop Color=\"#15FFFFFF\" Offset=\"0.5\" />"
-              L"<GradientStop Color=\"#40FFFFFF\" Offset=\"1\" />"
-              L"</LinearGradientBrush>",
-              edgeColor.c_str()),
-          Fmt(L"Height=%d", dockHeight),
-          // Sit at the bottom of the taskbar, lifted by the bottom distance.
-          L"VerticalAlignment=Bottom",
-          Fmt(L"Margin=0,0,0,%d", dockBottom)});
+    std::vector<std::wstring> rootStyles{
+        Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
+            blurAmount, tintColor.c_str()),
+        Fmt(L"CornerRadius=%d", cornerRadius),
+        L"BorderThickness=1",
+        Fmt(L"BorderBrush:=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\">"
+            L"<GradientStop Color=\"%s\" Offset=\"0\" />"
+            L"<GradientStop Color=\"#15FFFFFF\" Offset=\"0.5\" />"
+            L"<GradientStop Color=\"#40FFFFFF\" Offset=\"1\" />"
+            L"</LinearGradientBrush>",
+            edgeColor.c_str())};
+    if (!vertical) {
+        rootStyles.push_back(L"HorizontalAlignment=Center");
+        rootStyles.push_back(Fmt(L"Padding=%d,0,%d,0", paddingX, paddingX));
+        rootStyles.push_back(Fmt(L"Height=%d", dockHeight));
+        // Sit at the bottom of the taskbar, lifted by the bottom distance.
+        rootStyles.push_back(L"VerticalAlignment=Bottom");
+        rootStyles.push_back(Fmt(L"Margin=0,0,0,%d", dockBottom));
+    } else {
+        // Fill the taskbar width (minus the distance to the screen edge), so
+        // the dock never gets clipped, and shrink to the icons vertically.
+        rootStyles.push_back(L"VerticalAlignment=Center");
+        rootStyles.push_back(L"HorizontalAlignment=Stretch");
+        rootStyles.push_back(Fmt(L"Padding=0,%d,0,%d", paddingX, paddingX));
+        rootStyles.push_back(rightEdge
+                                 ? Fmt(L"Margin=2,0,%d,0", dockBottom)
+                                 : Fmt(L"Margin=%d,0,2,0", dockBottom));
+    }
+    Rule(L"Taskbar.TaskbarFrame#TaskbarFrame > Grid#RootGrid", rootStyles);
 
     // Running indicator as a dot.
     std::wstring r = FormatDip(dotSize / 2.0);
@@ -9320,7 +9354,16 @@ void ApplyDockSettings() {
          L"Taskbar.TaskListLabeledButtonPanel@RunningIndicatorStates > Rectangle#RunningIndicator",
          {Fmt(L"Width=%d", dotSize), Fmt(L"Height=%d", dotSize),
           L"RadiusX=" + r, L"RadiusY=" + r,
-          Fmt(L"Margin=0,0,0,%d", -dotOffset), L"VerticalAlignment=Bottom",
+          !vertical ? Fmt(L"Margin=0,0,0,%d", -dotOffset)
+          : rightEdge ? Fmt(L"Margin=0,0,%d,0", -dotOffset)
+                      : Fmt(L"Margin=%d,0,0,0", -dotOffset),
+          !vertical ? L"VerticalAlignment=Bottom" : L"VerticalAlignment=Center",
+          !vertical ? L"HorizontalAlignment=Center"
+          : rightEdge ? L"HorizontalAlignment=Right"
+                      : L"HorizontalAlignment=Left",
+          Fmt(L"Height@ActiveRunningIndicator=%d", dotSize),
+          Fmt(L"Height@InactiveRunningIndicator=%d", dotSize),
+          Fmt(L"Height@RequestingAttentionRunningIndicator=%d", dotSize),
           L"Fill=" + dotInactive,
           Fmt(L"Width@ActiveRunningIndicator=%d", dotSize),
           L"Fill@ActiveRunningIndicator=" + dotActive,
@@ -9335,7 +9378,8 @@ void ApplyDockSettings() {
              {L"Opacity=0"});
     }
 
-    Rule(L"Taskbar.TaskListButton", {Fmt(L"Width=%d", buttonWidth), L"Margin=0"});
+    Rule(L"Taskbar.TaskListButton",
+         {Fmt(vertical ? L"Height=%d" : L"Width=%d", buttonWidth), L"Margin=0"});
 
     if (hideTray) {
         Rule(L"SystemTray.SystemTrayFrame", {L"Visibility=Collapsed"});
@@ -9346,8 +9390,11 @@ void ApplyDockSettings() {
     }
 
     // Custom app icons.
+    // Positive offset moves the icon towards the dot (screen edge).
     std::wstring iconMargin =
-        Fmt(L"Margin=-1,%d,-1,%d", -2 - iconOffsetY, -2 + iconOffsetY);
+        !vertical ? Fmt(L"Margin=-1,%d,-1,%d", -2 - iconOffsetY, -2 + iconOffsetY)
+        : rightEdge ? Fmt(L"Margin=%d,-1,%d,-1", -2 - iconOffsetY, -2 + iconOffsetY)
+                    : Fmt(L"Margin=%d,-1,%d,-1", -2 + iconOffsetY, -2 - iconOffsetY);
 
     for (int i = 0; i < 200; i++) {
         std::wstring name = GetStr(Fmt(L"apps[%d].name", i));
