@@ -198,6 +198,19 @@ function Load-MyDefaults {
         </StackPanel>
       </Border>
 
+      <Border Background="White" CornerRadius="10" Padding="16" BorderBrush="#DDE1E6" BorderThickness="1" Margin="0,14,0,0">
+        <StackPanel>
+          <TextBlock Text="Position" FontWeight="SemiBold" FontSize="14"/>
+          <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+            <RadioButton Name="PosLeft" Content="Left" GroupName="DockPos" Margin="0,0,22,0"/>
+            <RadioButton Name="PosBottom" Content="Bottom" GroupName="DockPos" Margin="0,0,22,0"/>
+            <RadioButton Name="PosRight" Content="Right" GroupName="DockPos"/>
+          </StackPanel>
+          <TextBlock Foreground="#5D6675" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Text="Moves the Windows taskbar and the dock together. On the left or right the dock keeps its look and shrinks to fit. Explorer restarts automatically."/>
+        </StackPanel>
+      </Border>
+
       <WrapPanel Margin="0,14,0,0">
         <Button Name="BtnReset" Content="My defaults"/>
         <Button Name="BtnSaveDefaults" Content="Save current as default"/>
@@ -227,7 +240,7 @@ function Load-MyDefaults {
 
 $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Status','ScaleText','ScaleSlider','BtnReset','BtnSaveDefaults','BtnRestart','AdvPanel','BtnScan','TaskbarAppsPanel') { $ui[$n] = $window.FindName($n) }
+foreach ($n in 'Status','ScaleText','ScaleSlider','BtnReset','BtnSaveDefaults','BtnRestart','AdvPanel','BtnScan','TaskbarAppsPanel','PosLeft','PosBottom','PosRight') { $ui[$n] = $window.FindName($n) }
 
 $state = Read-State
 
@@ -676,12 +689,46 @@ $ui.BtnSaveDefaults.Add_Click({
     Save-MyDefaults $state
     $ui.Status.Text = 'Current settings saved as “My defaults”.'
 })
-$ui.BtnRestart.Add_Click({
+function Restart-Explorer {
     Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 800
     if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+}
+$ui.BtnRestart.Add_Click({
+    Restart-Explorer
     $ui.Status.Text = 'Explorer restarted.'
 })
+
+# ----- Position (Windows setting "Taskbar position": 0 = left, 2 = right, 3 = bottom)
+$TaskbarKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+function Get-DockPosition {
+    try { $v = (Get-ItemProperty -Path $TaskbarKey -Name TaskbarLocation -ErrorAction Stop).TaskbarLocation } catch { $v = 3 }
+    return [int]$v
+}
+function Show-DockPosition {
+    $script:loading = $true
+    $p = Get-DockPosition
+    $ui.PosLeft.IsChecked = ($p -eq 0)
+    $ui.PosRight.IsChecked = ($p -eq 2)
+    $ui.PosBottom.IsChecked = ($p -ne 0 -and $p -ne 2)
+    $script:loading = $false
+}
+function Set-DockPosition([int]$p, [string]$name) {
+    if ($script:loading -or (Get-DockPosition) -eq $p) { return }
+    try {
+        Set-ItemProperty -Path $TaskbarKey -Name TaskbarLocation -Value $p -Type DWord
+        $ui.Status.Text = "Moving the dock to the $name …"
+        $window.Dispatcher.Invoke([action]{}, 'Render')
+        Restart-Explorer
+        $ui.Status.Text = "Dock moved to the $name."
+    } catch {
+        $ui.Status.Text = "Could not move the dock: $($_.Exception.Message)"
+    }
+}
+$ui.PosLeft.Add_Checked({ Set-DockPosition 0 'left' })
+$ui.PosBottom.Add_Checked({ Set-DockPosition 3 'bottom' })
+$ui.PosRight.Add_Checked({ Set-DockPosition 2 'right' })
+Show-DockPosition
 
 $window.Add_Closing({ if ($saveTimer.IsEnabled) { $saveTimer.Stop(); try { Write-State $state } catch {} } })
 

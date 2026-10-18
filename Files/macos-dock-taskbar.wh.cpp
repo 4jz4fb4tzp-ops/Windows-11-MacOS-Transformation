@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.2.1
+// @version         1.3
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9317,13 +9317,24 @@ void ApplyDockSettings() {
     bool vertical = edge == ABE_LEFT || edge == ABE_RIGHT;
     bool rightEdge = edge == ABE_RIGHT;
 
-    // A vertical taskbar is narrower than the dock is high, so shrink the
-    // icons until they fit next to the dot instead of getting cut off.
-    // Space used: edge distance + 2 (margin) + 2 (border) + dot + 4 (air).
+    // A vertical taskbar is narrower than the horizontal one is high. Shrink
+    // the whole dock by one factor so it keeps exactly the same proportions
+    // as at the bottom (dock width = dock height, same spacing, dots, radius).
     if (vertical && taskbarWidth > 0) {
-        int maxIcon = taskbarWidth - dockBottom - 4 - dotSize - 4;
-        if (maxIcon < 16) maxIcon = 16;
-        if (iconSize > maxIcon) iconSize = maxIcon;
+        int needed = dockHeight + dockBottom + 2;
+        if (needed > taskbarWidth) {
+            auto fit = [&](int& v) { v = MulDiv(v, taskbarWidth, needed); };
+            fit(dockHeight);
+            fit(cornerRadius);
+            fit(paddingX);
+            fit(dockBottom);
+            fit(buttonWidth);
+            fit(iconSize);
+            fit(iconOffsetY);
+            fit(dotSize);
+            fit(dotOffset);
+            if (dotSize < 2) dotSize = 2;
+        }
     }
 
     {
@@ -9354,14 +9365,16 @@ void ApplyDockSettings() {
         rootStyles.push_back(L"VerticalAlignment=Bottom");
         rootStyles.push_back(Fmt(L"Margin=0,0,0,%d", dockBottom));
     } else {
-        // Fill the taskbar width (minus the distance to the screen edge), so
-        // the dock never gets clipped, and shrink to the icons vertically.
+        // Same as at the bottom, turned by 90°: the dock height becomes the
+        // dock width, it sits at the screen edge with the same distance and
+        // is only as long as the icons need.
         rootStyles.push_back(L"VerticalAlignment=Center");
-        rootStyles.push_back(L"HorizontalAlignment=Stretch");
+        rootStyles.push_back(rightEdge ? L"HorizontalAlignment=Right"
+                                       : L"HorizontalAlignment=Left");
+        rootStyles.push_back(Fmt(L"Width=%d", dockHeight));
         rootStyles.push_back(Fmt(L"Padding=0,%d,0,%d", paddingX, paddingX));
-        rootStyles.push_back(rightEdge
-                                 ? Fmt(L"Margin=2,0,%d,0", dockBottom)
-                                 : Fmt(L"Margin=%d,0,2,0", dockBottom));
+        rootStyles.push_back(rightEdge ? Fmt(L"Margin=0,0,%d,0", dockBottom)
+                                       : Fmt(L"Margin=%d,0,0,0", dockBottom));
     }
     Rule(L"Taskbar.TaskbarFrame#TaskbarFrame > Grid#RootGrid", rootStyles);
 
@@ -9395,8 +9408,13 @@ void ApplyDockSettings() {
              {L"Opacity=0"});
     }
 
-    Rule(L"Taskbar.TaskListButton",
-         {Fmt(vertical ? L"Height=%d" : L"Width=%d", buttonWidth), L"Margin=0"});
+    if (vertical) {
+        Rule(L"Taskbar.TaskListButton",
+             {Fmt(L"Height=%d", buttonWidth), Fmt(L"Width=%d", dockHeight - 2),
+              L"Margin=0"});
+    } else {
+        Rule(L"Taskbar.TaskListButton", {Fmt(L"Width=%d", buttonWidth), L"Margin=0"});
+    }
 
     if (hideTray) {
         Rule(L"SystemTray.SystemTrayFrame", {L"Visibility=Collapsed"});

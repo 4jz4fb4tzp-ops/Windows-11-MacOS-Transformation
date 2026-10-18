@@ -177,6 +177,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **New (macOS Dock 1.3):** choose **Left**, **Bottom** or **Right** under *Position* in the Dock Settings app. It moves the Windows taskbar, restarts Explorer and the dock keeps its look on the side (it shrinks proportionally to fit the narrower taskbar).
 - **Fixed (macOS Dock 1.2.1, Top Menu Bar 0.31.2):** with the dock on the left or right, the icons were cut off and the menu bar was shifted. Icons now shrink to fit the taskbar width and the menu bar always spans the full screen width.
 - **New (macOS Dock 1.2):** the dock now works with the taskbar on the left or right (Windows Settings → Personalization → Taskbar → Taskbar behaviors). The dock runs vertically and the dots sit on the screen-edge side. Restart Explorer once after changing the taskbar position.
 - **New:** one-click setup (`Setup.cmd`) that installs Windhawk, all mods and settings automatically.
