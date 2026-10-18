@@ -177,6 +177,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **Fixed (macOS Dock 1.2.1, Top Menu Bar 0.31.2):** with the dock on the left or right, the icons were cut off and the menu bar was shifted. Icons now shrink to fit the taskbar width and the menu bar always spans the full screen width.
 - **New (macOS Dock 1.2):** the dock now works with the taskbar on the left or right (Windows Settings → Personalization → Taskbar → Taskbar behaviors). The dock runs vertically and the dots sit on the screen-edge side. Restart Explorer once after changing the taskbar position.
 - **New:** one-click setup (`Setup.cmd`) that installs Windhawk, all mods and settings automatically.
 - **New (macOS Dock 1.1):** light and dark mode for the dock. In the Dock Settings app under *Advanced → Appearance* choose **Follow Windows**, **Light** or **Dark**. "Follow Windows" switches automatically with the Windows mode. Both modes have their own tint and edge colors.

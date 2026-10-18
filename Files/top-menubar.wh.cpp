@@ -2,7 +2,7 @@
 // @id              top-menubar
 // @name            Top Menu Bar
 // @description     macOS-style menu bar at the top of the screen with app menus, status items and Control Center
-// @version         0.31.1
+// @version         0.31.2
 // @author          Okan
 // @include         explorer.exe
 // @compilerOptions -lshell32 -lgdi32 -luser32 -lversion -lole32 -lwlanapi -liphlpapi -lcomctl32 -lcomdlg32 -ladvapi32 -ldwmapi -lgdiplus -lbthprops -luxtheme
@@ -1326,10 +1326,15 @@ void PositionAppBar(HWND h) {
     abd.rc = mr;
     abd.rc.bottom = abd.rc.top + ht;
     SHAppBarMessage(ABM_QUERYPOS, &abd);
+    // Like on macOS the bar always spans the full screen width, even when
+    // the taskbar / dock sits on the left or right edge (Windows would
+    // otherwise shrink the bar to the space next to the taskbar).
+    abd.rc.left = mr.left;
+    abd.rc.right = mr.right;
     abd.rc.bottom = abd.rc.top + ht;
     SHAppBarMessage(ABM_SETPOS, &abd);
 
-    MoveWindow(h, abd.rc.left, abd.rc.top, abd.rc.right - abd.rc.left, ht, FALSE);
+    MoveWindow(h, mr.left, abd.rc.top, mr.right - mr.left, ht, FALSE);
 }
 
 // ======================================================================

@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.2
+// @version         1.2.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9160,13 +9160,20 @@ bool IsDarkAppearance() {
     return IsWindowsDarkMode();
 }
 
-// Screen edge of the taskbar: ABE_BOTTOM, ABE_LEFT, ABE_RIGHT or ABE_TOP.
-UINT GetTaskbarEdge() {
+// Screen edge of the taskbar (ABE_BOTTOM, ABE_LEFT, ABE_RIGHT or ABE_TOP)
+// and its width in DIPs (only meaningful for a vertical taskbar).
+UINT GetTaskbarEdge(int* widthDip = nullptr) {
     APPBARDATA appBarData = {
         .cbSize = sizeof(APPBARDATA),
     };
     if (!SHAppBarMessage(ABM_GETTASKBARPOS, &appBarData)) {
         return ABE_BOTTOM;
+    }
+    if (widthDip) {
+        HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+        UINT dpi = tray ? GetDpiForWindow(tray) : 96;
+        if (!dpi) dpi = 96;
+        *widthDip = MulDiv(appBarData.rc.right - appBarData.rc.left, 96, dpi);
     }
     return appBarData.uEdge;
 }
@@ -9305,9 +9312,19 @@ void ApplyDockSettings() {
          {L"Fill=Transparent"});
     // Taskbar on the left or right: the dock runs vertically and the dots
     // sit on the screen-edge side of the icons, like on macOS.
-    UINT edge = GetTaskbarEdge();
+    int taskbarWidth = 0;
+    UINT edge = GetTaskbarEdge(&taskbarWidth);
     bool vertical = edge == ABE_LEFT || edge == ABE_RIGHT;
     bool rightEdge = edge == ABE_RIGHT;
+
+    // A vertical taskbar is narrower than the dock is high, so shrink the
+    // icons until they fit next to the dot instead of getting cut off.
+    // Space used: edge distance + 2 (margin) + 2 (border) + dot + 4 (air).
+    if (vertical && taskbarWidth > 0) {
+        int maxIcon = taskbarWidth - dockBottom - 4 - dotSize - 4;
+        if (maxIcon < 16) maxIcon = 16;
+        if (iconSize > maxIcon) iconSize = maxIcon;
+    }
 
     {
         std::vector<std::wstring> frameStyles{
