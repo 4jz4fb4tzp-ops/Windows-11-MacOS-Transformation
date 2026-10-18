@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.3
+// @version         1.4
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -56,7 +56,10 @@ contains common Windows apps; adjust the file names to your icons.
 * The taskbar height and the size of icons without a custom PNG are fully
   applied after restarting Explorer.
 * After moving the taskbar to another side, restart Explorer once so the dock
-  switches its layout.
+  switches its layout (the Dock Settings app does this for you).
+* On the left or right the dock shrinks automatically when it would no longer
+  fit on the screen, instead of hiding apps behind "…". Icons whose file name
+  contains "separator" are turned by 90° there.
 
 Colors use the `#AARRGGBB` format (AA = opacity).
 
@@ -9178,6 +9181,27 @@ UINT GetTaskbarEdge(int* widthDip = nullptr) {
     return appBarData.uEdge;
 }
 
+// Extra shrink factor for a vertical dock that would not fit on the screen.
+// Adjusted at runtime by the taskbar layout check (1 = no extra shrinking).
+std::atomic<double> g_lengthFactor{1.0};
+std::atomic<int> g_cachedEdge{ABE_BOTTOM};
+
+bool IsVerticalEdge(UINT edge) {
+    return edge == ABE_LEFT || edge == ABE_RIGHT;
+}
+
+// Factor the whole dock is scaled with on the left or right: first so that it
+// keeps its bottom proportions in the narrower taskbar, then so that all apps
+// fit on the screen. dockHeight/dockBottom are already scaled pixel values.
+double GetVerticalFactor(int taskbarWidth, int dockHeight, int dockBottom) {
+    double f = 1.0;
+    int needed = dockHeight + dockBottom + 2;
+    if (taskbarWidth > 0 && needed > taskbarWidth) {
+        f = (double)taskbarWidth / needed;
+    }
+    return f * g_lengthFactor.load();
+}
+
 bool IsAppearanceAuto() {
     std::wstring appearance = GetStr(L"appearance");
     return appearance != L"dark" && appearance != L"light";
@@ -9314,16 +9338,17 @@ void ApplyDockSettings() {
     // sit on the screen-edge side of the icons, like on macOS.
     int taskbarWidth = 0;
     UINT edge = GetTaskbarEdge(&taskbarWidth);
-    bool vertical = edge == ABE_LEFT || edge == ABE_RIGHT;
+    g_cachedEdge = edge;
+    bool vertical = IsVerticalEdge(edge);
     bool rightEdge = edge == ABE_RIGHT;
 
     // A vertical taskbar is narrower than the horizontal one is high. Shrink
     // the whole dock by one factor so it keeps exactly the same proportions
     // as at the bottom (dock width = dock height, same spacing, dots, radius).
-    if (vertical && taskbarWidth > 0) {
-        int needed = dockHeight + dockBottom + 2;
-        if (needed > taskbarWidth) {
-            auto fit = [&](int& v) { v = MulDiv(v, taskbarWidth, needed); };
+    if (vertical) {
+        double f = GetVerticalFactor(taskbarWidth, dockHeight, dockBottom);
+        if (f < 0.999) {
+            auto fit = [f](int& v) { v = (int)(v * f + 0.5); };
             fit(dockHeight);
             fit(cornerRadius);
             fit(paddingX);
@@ -9460,9 +9485,23 @@ void ApplyDockSettings() {
             }
         }
 
-        Rule(iconTargets,
-             {L"Source=" + FileUrl(folder, file), Fmt(L"Width=%d", iconSize),
-              Fmt(L"Height=%d", iconSize), iconMargin});
+        std::vector<std::wstring> iconStyles{
+            L"Source=" + FileUrl(folder, file), Fmt(L"Width=%d", iconSize),
+            Fmt(L"Height=%d", iconSize), iconMargin};
+        // A separator line is vertical at the bottom and has to lie flat when
+        // the dock runs from top to bottom.
+        if (vertical) {
+            std::wstring lower = file + L"|" + name;
+            for (auto& c : lower) c = towlower(c);
+            if (lower.find(L"separator") != std::wstring::npos ||
+                lower.find(L"trenn") != std::wstring::npos ||
+                lower.find(L"spacer") != std::wstring::npos) {
+                iconStyles.push_back(L"RenderTransformOrigin=0.5,0.5");
+                iconStyles.push_back(
+                    L"RenderTransform:=<RotateTransform Angle=\"90\" />");
+            }
+        }
+        Rule(iconTargets, iconStyles);
         Rule(borderTargets, {L"Visibility=Collapsed"});
     }
 }
@@ -9964,6 +10003,8 @@ bool HookInitializeXamlDiagnosticsExIfNeeded() {
 #include <string>
 #include <string_view>
 #include <unordered_map>
+
+void ReloadDock(bool settingsChanged);
 
 namespace taskbarheight {
 
@@ -11165,6 +11206,124 @@ int WINAPI SystemTrayFrame_MeasureOverride_Hook(
     return ret;
 }
 
+// ----------------------------------------------------------------------
+// Vertical dock: shrink instead of overflowing
+// ----------------------------------------------------------------------
+std::atomic<bool> g_fitReloadPending;
+DWORD g_lastFitReloadTick;
+
+bool HasVisibleOverflow(FrameworkElement element, int depth) {
+    bool found = false;
+    EnumChildElements(element, [&](FrameworkElement child) {
+        if (child.Visibility() != Visibility::Visible) {
+            return false;
+        }
+        std::wstring cls(winrt::get_class_name(child));
+        std::wstring name(child.Name());
+        if ((cls.find(L"Overflow") != std::wstring::npos ||
+             name.find(L"Overflow") != std::wstring::npos) &&
+            child.ActualWidth() > 0 && child.ActualHeight() > 0) {
+            found = true;
+            return true;
+        }
+        if (depth > 0 && HasVisibleOverflow(child, depth - 1)) {
+            found = true;
+            return true;
+        }
+        return false;
+    });
+    return found;
+}
+
+void CheckVerticalDockFit(FrameworkElement frame, float availableLength) {
+    if (g_unloading || g_fitReloadPending ||
+        !macdock::IsVerticalEdge(macdock::g_cachedEdge)) {
+        return;
+    }
+    // Don't react to the layout passes caused by our own reload.
+    if (GetTickCount() - g_lastFitReloadTick < 1500) {
+        return;
+    }
+
+    auto rootGrid = FindChildByName(frame, L"RootGrid");
+    if (!rootGrid) {
+        return;
+    }
+    auto repeater = FindChildByName(rootGrid, L"TaskbarFrameRepeater");
+    if (!repeater) {
+        return;
+    }
+
+    double repeaterHeight = repeater.ActualHeight();
+    int count = 0;
+    EnumChildElements(repeater, [&](FrameworkElement child) {
+        if (child.Visibility() != Visibility::Visible ||
+            child.ActualHeight() <= 0) {
+            return false;
+        }
+        // Recycled elements are parked outside of the repeater.
+        auto pos = child.TransformToVisual(repeater).TransformPoint({0, 0});
+        if (pos.Y < -1 || pos.Y > repeaterHeight + 1) {
+            return false;
+        }
+        count++;
+        return false;
+    });
+    if (count == 0) {
+        return;
+    }
+
+    bool overflow = HasVisibleOverflow(frame, 4);
+
+    double length = availableLength;
+    if (!(length > 0) || std::isinf(length)) {
+        RECT rc{};
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
+        UINT dpi = GetDpiForSystem();
+        length = MulDiv(rc.bottom - rc.top, 96, dpi ? dpi : 96);
+    }
+    // Room for the dock padding and a little air to the screen edges.
+    length -= 24;
+
+    double current = macdock::g_lengthFactor.load();
+    double extent = g_settings.taskbarButtonWidth;
+    double baseExtent = extent / current;
+    double target;
+    if (overflow) {
+        // More apps than shown: shrink step by step until all fit.
+        target = current * 0.85;
+    } else {
+        target = length / (count * baseExtent);
+    }
+    if (target > 1) target = 1;
+    if (target < 0.4) target = 0.4;
+
+    bool shrink = target < current - 0.01;
+    bool grow = !overflow && target > current + 0.05;
+    if (!shrink && !grow) {
+        return;
+    }
+
+    Wh_Log(L"Vertical dock fit: %d apps, overflow=%d, length=%f, factor %f->%f",
+           count, overflow, length, current, target);
+    macdock::g_lengthFactor = target;
+    g_fitReloadPending = true;
+    HANDLE thread = CreateThread(
+        nullptr, 0,
+        [](LPVOID) -> DWORD {
+            ReloadDock(true);
+            g_lastFitReloadTick = GetTickCount();
+            g_fitReloadPending = false;
+            return 0;
+        },
+        nullptr, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        g_fitReloadPending = false;
+    }
+}
+
 using TaskbarFrame_MeasureOverride_t =
     int(WINAPI*)(void* pThis,
                  winrt::Windows::Foundation::Size size,
@@ -11181,6 +11340,20 @@ int WINAPI TaskbarFrame_MeasureOverride_Hook(
     int ret = TaskbarFrame_MeasureOverride_Original(pThis, size, resultSize);
 
     g_pendingMeasureOverride = false;
+
+    if (macdock::IsVerticalEdge(macdock::g_cachedEdge) && !g_unloading) {
+        try {
+            winrt::Windows::UI::Xaml::IFrameworkElementOverrides overrides{
+                nullptr};
+            winrt::copy_from_abi(overrides, pThis);
+            if (auto frame = overrides.try_as<FrameworkElement>()) {
+                CheckVerticalDockFit(frame, size.Height);
+            }
+        } catch (...) {
+            HRESULT hr = winrt::to_hresult();
+            Wh_Log(L"Error %08X", hr);
+        }
+    }
 
     g_hookCallCounter--;
 
@@ -12244,6 +12417,23 @@ void LoadSettings() {
     g_settings.iconSize = px(nativeIconSize > 0 ? nativeIconSize : 24);
     int buttonWidth = Wh_GetIntSetting(L"buttonWidth");
     g_settings.taskbarButtonWidth = px(buttonWidth > 0 ? buttonWidth : 44);
+
+    // On the left or right Windows decides with this button extent how many
+    // apps fit before it shows "…", so it has to match the shrunken dock.
+    int taskbarWidth = 0;
+    UINT edge = macdock::GetTaskbarEdge(&taskbarWidth);
+    macdock::g_cachedEdge = edge;
+    if (macdock::IsVerticalEdge(edge)) {
+        double f = macdock::GetVerticalFactor(
+            taskbarWidth, macdock::GetPx(L"dockHeight"),
+            macdock::GetPx(L"dockBottom"));
+        if (f < 0.999) {
+            g_settings.taskbarButtonWidth =
+                std::max(16, (int)(g_settings.taskbarButtonWidth * f + 0.5));
+            g_settings.iconSize =
+                std::max(12, (int)(g_settings.iconSize * f + 0.5));
+        }
+    }
     g_settings.iconSizeSmall = 16;
     g_settings.taskbarButtonWidthSmall = 32;
 }
