@@ -177,6 +177,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **Changed (macOS Dock 1.12):** new installs start with the author's tuned settings, separately for bottom and left/right. No custom app icons are preset anymore, so every app keeps its Windows icon until you pick one with **Choose icon …** in the Dock Settings app.
 - **New (macOS Dock 1.9):** bottom and left/right keep separate settings in the Dock Settings app; changes only apply to the current position. On the left or right the size goes up to 100%.
 - **New:** the Dock Settings app turns the separator of the *Taskbar Icon Separators* mod by 90° when the dock is on the left or right (and back at the bottom).
 - **Fixed (macOS Dock 1.6):** on the left or right the taskbar itself now gets wider with the size slider (same thickness as at the bottom), so icons are no longer cut off and the dot keeps its distance to the icon.

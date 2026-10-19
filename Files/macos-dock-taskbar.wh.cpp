@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.11.1
+// @version         1.12
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -45,9 +45,9 @@ under **Icon folder**. By default this is
 `%USERPROFILE%\Documents\MacOs-Dock\Icons`.
 
 For each app, add an entry under **Apps and icons** with its App ID and the PNG
-file name. You can find App IDs by running `Get-StartApps` in PowerShell.
-Several IDs can be listed for one app, separated by commas. The default list
-contains common Windows apps; adjust the file names to your icons.
+file name (easiest with "Choose icon" in the Dock Settings app). You can find
+App IDs by running `Get-StartApps` in PowerShell. Several IDs can be listed for
+one app, separated by commas. Apps without an entry keep their Windows icon.
 
 ## Tips
 
@@ -94,15 +94,15 @@ code from the **TranslucentTB** project.
   $name: Dock – corner radius (px)
 - paddingX: 3
   $name: Dock – padding left/right (px)
-- dockBottom: 6
+- dockBottom: 2
   $name: Dock – distance to bottom screen edge (px)
   $description: >-
     Moves the dock up. If it gets cut off at the top, increase the taskbar
     height.
-- blurAmount: 8
+- blurAmount: 3
   $name: Dock – blur amount
   $description: 0 = no blur, 4 = light, 15 = strong
-- appearance: auto
+- appearance: "auto"
   $name: Dock – appearance
   $description: >-
     Light or dark dock. "Follow Windows" switches automatically with the
@@ -115,7 +115,7 @@ code from the **TranslucentTB** project.
   $name: Dock – tint, light mode (#AARRGGBB)
 - edgeColor: "#90FFFFFF"
   $name: Dock – top edge highlight, light mode (#AARRGGBB)
-- darkTintColor: "#80202020"
+- darkTintColor: "#1A202020"
   $name: Dock – tint, dark mode (#AARRGGBB)
 - darkEdgeColor: "#50FFFFFF"
   $name: Dock – top edge highlight, dark mode (#AARRGGBB)
@@ -129,7 +129,7 @@ code from the **TranslucentTB** project.
 - iconOffsetY: 1
   $name: Icons – vertical position (px)
   $description: Positive = lower, negative = higher
-- dotSize: 4
+- dotSize: 3
   $name: Indicator – dot size (px)
 - dotOffset: 1
   $name: Indicator – offset down (px)
@@ -141,11 +141,11 @@ code from the **TranslucentTB** project.
   $description: >-
     Positive = to the right, negative = to the left. With the dock on the
     right it's mirrored automatically.
-- dotActiveColor: "#FFFFFFFF"
+- dotActiveColor: "#FFFFFF"
   $name: Indicator – active color
-- dotInactiveColor: "#B0FFFFFF"
+- dotInactiveColor: "#C2C2C2"
   $name: Indicator – background app color
-- dotAttentionColor: "#FFFF9F0A"
+- dotAttentionColor: "#000000"
   $name: Indicator – attention color
 - hideStart: true
   $name: Hide Start button
@@ -157,57 +157,12 @@ code from the **TranslucentTB** project.
   $name: Icon folder
   $description: Folder with the PNG files. Environment variables like %USERPROFILE% are allowed.
 - apps:
-  - - name: "File Explorer"
+  - - name: ""
       $name: Name
-    - ids: "Microsoft.Windows.Explorer"
+    - ids: ""
       $name: App IDs (comma separated)
-    - file: "finder.png"
+    - file: ""
       $name: PNG file
-  - - name: "Microsoft Store"
-    - ids: "Microsoft.WindowsStore_8wekyb3d8bbwe!App"
-    - file: "app store.png"
-  - - name: "Settings"
-    - ids: "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel, Microsoft.Windows.ControlPanel"
-    - file: "system settings.png"
-  - - name: "Photos"
-    - ids: "Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
-    - file: "photos.png"
-  - - name: "Calculator"
-    - ids: "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
-    - file: "calculator.png"
-  - - name: "Notepad"
-    - ids: "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
-    - file: "textedit.png"
-  - - name: "Snipping Tool"
-    - ids: "Microsoft.ScreenSketch_8wekyb3d8bbwe!App"
-    - file: "screenshot.png"
-  - - name: "Clock"
-    - ids: "Microsoft.WindowsAlarms_8wekyb3d8bbwe!App"
-    - file: "clock.png"
-  - - name: "Media Player"
-    - ids: "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
-    - file: "music.png"
-  - - name: "Camera"
-    - ids: "Microsoft.WindowsCamera_8wekyb3d8bbwe!App"
-    - file: "photo booth.png"
-  - - name: "Terminal"
-    - ids: "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App, {1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\cmd.exe, C:\\Windows\\System32\\cmd.exe, {1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-    - file: "terminal.png"
-  - - name: "Google Chrome"
-    - ids: "Chrome, C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-    - file: "chrome.png"
-  - - name: "Microsoft Edge"
-    - ids: "MSEdge"
-    - file: "safari.png"
-  - - name: "Word"
-    - ids: "Microsoft.Office.WINWORD.EXE.15"
-    - file: "word.png"
-  - - name: "Excel"
-    - ids: "Microsoft.Office.EXCEL.EXE.15"
-    - file: "excel.png"
-  - - name: "PowerPoint"
-    - ids: "Microsoft.Office.POWERPNT.EXE.15"
-    - file: "powerpoint.png"
   $name: Apps and icons
 - controlStyles:
   - - target: ""

@@ -51,24 +51,24 @@ $NumberDefs = @(
     @{K='dockHeight';     L='Dock height';                 Min=30;  Max=90;  G='Dock';  D=52}
     @{K='cornerRadius';   L='Corner radius';                 Min=0;   Max=40;  G='Dock';  D=17}
     @{K='paddingX';       L='Padding left/right';          Min=0;   Max=30;  G='Dock';  D=3}
-    @{K='dockBottom';     L='Distance to bottom edge';     Min=0;   Max=30;  G='Dock';  D=6}
-    @{K='blurAmount';     L='Blur amount';                 Min=0;   Max=30;  G='Dock';  D=8}
+    @{K='dockBottom';     L='Distance to bottom edge';     Min=0;   Max=30;  G='Dock';  D=2}
+    @{K='blurAmount';     L='Blur amount';                 Min=0;   Max=30;  G='Dock';  D=3}
     @{K='buttonWidth';    L='Space per icon';              Min=30;  Max=80;  G='Icons'; D=44}
     @{K='iconSize';       L='Custom icon size';            Min=20;  Max=70;  G='Icons'; D=38}
     @{K='nativeIconSize'; L='Other icon size (0 = default)'; Min=0; Max=64;  G='Icons'; D=29}
     @{K='iconOffsetY';    L='Icon position (+ = lower)';  Min=-10; Max=10;  G='Icons'; D=1}
-    @{K='dotSize';        L='Dot size';                    Min=2;   Max=10;  G='Indicator'; D=4}
+    @{K='dotSize';        L='Dot size';                    Min=2;   Max=10;  G='Indicator'; D=3}
     @{K='dotOffset';      L='Dot offset (+ = lower / further from icon)'; Min=-8; Max=10; G='Indicator'; D=1}
     @{K='dotOffsetX';     L='Dot offset left/right (+ = right)'; Min=-20; Max=20; G='Indicator'; D=0}
 )
 $TextDefs = @(
     @{K='tintColor';         L='Tint, light mode (#AARRGGBB)'; D='#10FFFFFF'}
     @{K='edgeColor';         L='Edge highlight, light mode (#AARRGGBB)'; D='#90FFFFFF'}
-    @{K='darkTintColor';     L='Tint, dark mode (#AARRGGBB)'; D='#80202020'}
+    @{K='darkTintColor';     L='Tint, dark mode (#AARRGGBB)'; D='#1A202020'}
     @{K='darkEdgeColor';     L='Edge highlight, dark mode (#AARRGGBB)'; D='#50FFFFFF'}
-    @{K='dotActiveColor';    L='Dot active';                  D='#FFFFFFFF'}
-    @{K='dotInactiveColor';  L='Dot background app';        D='#B0FFFFFF'}
-    @{K='dotAttentionColor'; L='Dot attention';         D='#FFFF9F0A'}
+    @{K='dotActiveColor';    L='Dot active';                  D='#FFFFFF'}
+    @{K='dotInactiveColor';  L='Dot background app';        D='#C2C2C2'}
+    @{K='dotAttentionColor'; L='Dot attention';         D='#000000'}
     @{K='iconFolder';        L='Icon folder';                  D='%USERPROFILE%\Documents\MacOs-Dock\Icons'}
 )
 # Choices: key, label, default, options (value, label)
@@ -794,10 +794,25 @@ $ui.PosBottom.Add_Checked({ Set-DockPosition 3 'bottom' })
 $ui.PosRight.Add_Checked({ Set-DockPosition 2 'right' })
 Show-DockPosition
 Update-ScaleLimit (Get-DockPosition)
-# First start with this version: the current values become the values of the
-# current position.
-if (-not (Test-Path (Get-ProfileFile (Get-DockPosition)))) {
-    try { Save-Profile $state (Get-ProfileFile (Get-DockPosition)) } catch {}
+# Default values for each position (the project author's setup). A missing
+# profile gets them, except for the current position, which keeps the values
+# that are active right now.
+$DefaultProfileBottom = @{ scale=120; dotOffsetX=0; hideStart=1; iconSize=38; taskbarHeight=60; nativeIconSize=29; autoTaskbarHeight=1; hideTray=1; dockBottom=2; darkEdgeColor='#50FFFFFF'; paddingX=3; dotOffset=1; iconOffsetY=1; dotAttentionColor='#000000'; blurAmount=3; clickThroughTaskbar=1; buttonWidth=44; cornerRadius=17; dotInactiveColor='#C2C2C2'; dockHeight=52; dotActiveColor='#FFFFFF'; edgeColor='#90FFFFFF'; darkTintColor='#1A202020'; dotSize=3; appearance='auto'; tintColor='#10FFFFFF'; hideHover=1 }
+$DefaultProfileSide = @{ scale=90; dotOffsetX=3; hideStart=1; iconSize=38; taskbarHeight=60; nativeIconSize=29; autoTaskbarHeight=1; hideTray=1; dockBottom=2; darkEdgeColor='#50FFFFFF'; paddingX=3; dotOffset=1; iconOffsetY=1; dotAttentionColor='#000000'; blurAmount=3; clickThroughTaskbar=1; buttonWidth=44; cornerRadius=17; dotInactiveColor='#C2C2C2'; dockHeight=52; dotActiveColor='#FFFFFF'; edgeColor='#90FFFFFF'; darkTintColor='#1A202020'; dotSize=4; appearance='auto'; tintColor='#10FFFFFF'; hideHover=1 }
+foreach ($pos in 3, 0) {
+    $file = Get-ProfileFile $pos
+    if (Test-Path $file) { continue }
+    try {
+        if ((Get-ProfileFile (Get-DockPosition)) -eq $file) {
+            Save-Profile $state $file
+        } else {
+            $d = $(if ($pos -eq 3) { $DefaultProfileBottom } else { $DefaultProfileSide })
+            $copy = @{}
+            foreach ($k in $state.Keys) { if ($k -ne 'apps') { $copy[$k] = $state[$k] } }
+            foreach ($k in $d.Keys) { $copy[$k] = $d[$k] }
+            Save-Profile $copy $file
+        }
+    } catch {}
 }
 # Bring the separator rotation in line with the current position.
 try {
