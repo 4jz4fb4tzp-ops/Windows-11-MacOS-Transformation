@@ -131,6 +131,9 @@ function Write-State($s) {
         }
     } finally { $key.Close() }
 
+    # Keep the values of the current position (bottom or left/right).
+    try { Save-Profile $s (Get-ProfileFile (Get-DockPosition)) } catch {}
+
     # Windhawk benachrichtigen
     $modKey = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($ModKeyPath)
     try {
@@ -154,6 +157,31 @@ function Load-MyDefaults {
     foreach ($p in $j.PSObject.Properties) { if ($p.Name -ne 'apps') { $s[$p.Name] = $p.Value } }
     foreach ($a in $j.apps) { [void]$s.apps.Add((New-AppEntry $a.Name $a.Ids $a.Datei)) }
     return $s
+}
+
+# ----- Separate settings for bottom and left/right
+# Each position keeps its own copy of all values (the app list is shared).
+$ProfileBottomFile = Join-Path $AppDataDir 'profil-unten.json'
+$ProfileSideFile   = Join-Path $AppDataDir 'profil-seite.json'
+$SideMaxScale = 100
+
+function Get-ProfileFile([int]$pos) {
+    if ($pos -eq 0 -or $pos -eq 2) { return $ProfileSideFile } else { return $ProfileBottomFile }
+}
+
+function Save-Profile($s, [string]$file) {
+    if (-not (Test-Path $AppDataDir)) { New-Item -ItemType Directory -Path $AppDataDir | Out-Null }
+    $copy = @{}
+    foreach ($k in $s.Keys) { if ($k -ne 'apps') { $copy[$k] = $s[$k] } }
+    $copy | ConvertTo-Json -Depth 5 | Set-Content -Path $file -Encoding UTF8
+}
+
+# Copies the values of a saved profile into $s, keeping the app list.
+function Use-Profile($s, [string]$file) {
+    if (-not (Test-Path $file)) { return $false }
+    $j = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($p in $j.PSObject.Properties) { if ($p.Name -ne 'apps') { $s[$p.Name] = $p.Value } }
+    return $true
 }
 
 # ---------------------------------------------------------------- UI
@@ -207,7 +235,7 @@ function Load-MyDefaults {
             <RadioButton Name="PosRight" Content="Right" GroupName="DockPos"/>
           </StackPanel>
           <TextBlock Foreground="#5D6675" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"
-                     Text="Moves the Windows taskbar and the dock together. On the left or right the dock keeps its look and shrinks to fit. Explorer restarts automatically."/>
+                     Text="Moves the Windows taskbar and the dock together. Bottom and left/right keep separate settings: changes only apply to the current position. On the left or right the size goes up to 100%. Explorer restarts automatically."/>
         </StackPanel>
       </Border>
 
@@ -727,10 +755,30 @@ function Set-SeparatorRotation([int]$deg) {
     } finally { $modKey.Close() }
 }
 
+function Update-ScaleLimit([int]$pos) {
+    $side = ($pos -eq 0 -or $pos -eq 2)
+    $max = $(if ($side) { $SideMaxScale } else { 200 })
+    $ui.ScaleSlider.Maximum = $max
+    if ([int]$state.scale -gt $max) { $state.scale = $max }
+}
+
 function Set-DockPosition([int]$p, [string]$name) {
-    if ($script:loading -or (Get-DockPosition) -eq $p) { return }
+    $old = Get-DockPosition
+    if ($script:loading -or $old -eq $p) { return }
     try {
+        # Switch to the values saved for the new position. Left and right
+        # share one set. Without saved values, start from the current ones.
+        $oldFile = Get-ProfileFile $old
+        $newFile = Get-ProfileFile $p
+        if ($oldFile -ne $newFile) {
+            if ($saveTimer.IsEnabled) { $saveTimer.Stop() }
+            Save-Profile $state $oldFile
+            [void](Use-Profile $state $newFile)
+        }
         Set-ItemProperty -Path $TaskbarKey -Name TaskbarLocation -Value $p -Type DWord
+        Update-ScaleLimit $p
+        Show-State
+        Write-State $state
         try { Set-SeparatorRotation $(if ($p -eq 3) { 0 } else { 90 }) } catch {}
         $ui.Status.Text = "Moving the dock to the $name …"
         $window.Dispatcher.Invoke([action]{}, 'Render')
@@ -744,6 +792,12 @@ $ui.PosLeft.Add_Checked({ Set-DockPosition 0 'left' })
 $ui.PosBottom.Add_Checked({ Set-DockPosition 3 'bottom' })
 $ui.PosRight.Add_Checked({ Set-DockPosition 2 'right' })
 Show-DockPosition
+Update-ScaleLimit (Get-DockPosition)
+# First start with this version: the current values become the values of the
+# current position.
+if (-not (Test-Path (Get-ProfileFile (Get-DockPosition)))) {
+    try { Save-Profile $state (Get-ProfileFile (Get-DockPosition)) } catch {}
+}
 # Bring the separator rotation in line with the current position.
 try {
     $want = $(if ((Get-DockPosition) -in 0, 2) { 90 } else { 0 })

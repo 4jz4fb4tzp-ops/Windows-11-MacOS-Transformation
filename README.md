@@ -177,6 +177,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **New (macOS Dock 1.9):** bottom and left/right keep separate settings in the Dock Settings app; changes only apply to the current position. On the left or right the size goes up to 100%.
 - **New:** the Dock Settings app turns the separator of the *Taskbar Icon Separators* mod by 90° when the dock is on the left or right (and back at the bottom).
 - **Fixed (macOS Dock 1.6):** on the left or right the taskbar itself now gets wider with the size slider (same thickness as at the bottom), so icons are no longer cut off and the dot keeps its distance to the icon.
 - **Changed (macOS Dock 1.5):** on the left or right the taskbar now gets the same width as its height at the bottom, so the dock keeps all sizes and spacing and the size slider works exactly as at the bottom. The automatic shrinking from 1.4 was removed.
