@@ -173,6 +173,7 @@ add an entry under *Advanced → Apps and icons* with:
 ## Known issues
 
 - Missing icons on first start: many apps show their original Windows icon at first, because App IDs differ between PCs. Open the Dock Settings app, go to Taskbar icons and use Choose icon … for     each app (use Rescan if an app is missing from the list).
+- Minimize animation with the dock on the left or right: the *MacOS Minimize Animation* mod is made for a dock at the bottom, so minimizing and restoring windows looks glitchy when the dock is on the left or right.
 
   
 ## Changelog
