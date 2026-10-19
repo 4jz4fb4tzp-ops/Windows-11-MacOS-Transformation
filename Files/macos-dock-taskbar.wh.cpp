@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.7
+// @version         1.7.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9428,13 +9428,14 @@ void ApplyDockSettings() {
     if (vertical) {
         Rule(L"Taskbar.TaskListButton",
              {Fmt(L"Height=%d", buttonWidth), Fmt(L"Width=%d", dockHeight - 2),
-              L"Margin=0"});
+              L"Margin=0", L"Padding=0"});
         // Windows gives the icon panel the full taskbar width, which is wider
         // than the shrunken dock, so the icons would sit off-center and get
         // cut off on the right. Make it as wide as the button.
         Rule(L"Taskbar.TaskListButton > Grid#IconPanel, "
              L"Taskbar.TaskListButton > Taskbar.TaskListLabeledButtonPanel#IconPanel",
-             {Fmt(L"Width=%d", dockHeight - 2), L"HorizontalAlignment=Center"});
+             {Fmt(L"Width=%d", dockHeight - 2), L"HorizontalAlignment=Center",
+              L"Margin=0", L"Padding=0"});
         // The icon sits in a column sized for the Windows icon, which is
         // narrower than the dock icons and cuts them off on the right. Let it
         // span the whole button and center it.
@@ -11091,7 +11092,10 @@ void UpdateVerticalSizes() {
     double thickness = macdock::GetTaskbarThickness();
     double buttonSize = macdock::GetPx(L"dockHeight") - 2;
     for (auto& w : g_verticalFrames) {
-        if (auto e = w.get()) e.Width(thickness);
+        if (auto e = w.get()) {
+            e.Width(thickness);
+            e.MaxHeight(std::numeric_limits<double>::infinity());
+        }
     }
     for (auto& w : g_verticalTrayFrames) {
         if (auto e = w.get()) e.Width(thickness);
@@ -11129,6 +11133,11 @@ void WINAPI TaskbarController_UpdateFrameHeight_Hook(void* pThis) {
                 // A vertical frame is given a width, a horizontal one a height.
                 if (frameElement && !std::isnan(frameElement.Width())) {
                     TrackVerticalElement(g_verticalFrames, frameElement);
+                    // Windows limits the length and moves the rest of the
+                    // apps behind "…" long before the screen edge. Let the
+                    // dock grow up to the screen edges instead.
+                    frameElement.MaxHeight(
+                        std::numeric_limits<double>::infinity());
                     double width = macdock::GetTaskbarThickness();
                     Wh_Log(L"Vertical frame width: %f->%f",
                            frameElement.Width(), width);
