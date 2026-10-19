@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.6.2
+// @version         1.7
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -11063,6 +11063,49 @@ void TaskbarController_OnGroupingModeChanged_InitOffsets() {
     GetTaskbarFrameOffset();
 }
 
+// Elements of the native vertical taskbar that got the dock sizes, so they can
+// be resized right away when the size slider changes.
+std::vector<winrt::weak_ref<FrameworkElement>> g_verticalFrames;
+std::vector<winrt::weak_ref<FrameworkElement>> g_verticalTrayFrames;
+struct VerticalButton {
+    winrt::weak_ref<FrameworkElement> element;
+    void* taskListButton;
+};
+std::vector<VerticalButton> g_verticalButtons;
+
+void TrackVerticalElement(std::vector<winrt::weak_ref<FrameworkElement>>& list,
+                          FrameworkElement element) {
+    std::erase_if(list, [](auto& w) { return !w.get(); });
+    for (auto& w : list) {
+        if (w.get() == element) return;
+    }
+    list.push_back(winrt::make_weak(element));
+}
+
+using TaskListButton_TaskbarFrameSize_t = void(WINAPI*)(void* pThis,
+                                                        double frameSize);
+TaskListButton_TaskbarFrameSize_t TaskListButton_TaskbarFrameSize_Original;
+
+// Runs on the taskbar thread after the settings changed.
+void UpdateVerticalSizes() {
+    double thickness = macdock::GetTaskbarThickness();
+    double buttonSize = macdock::GetPx(L"dockHeight") - 2;
+    for (auto& w : g_verticalFrames) {
+        if (auto e = w.get()) e.Width(thickness);
+    }
+    for (auto& w : g_verticalTrayFrames) {
+        if (auto e = w.get()) e.Width(thickness);
+    }
+    std::erase_if(g_verticalButtons,
+                  [](auto& b) { return !b.element.get(); });
+    if (TaskListButton_TaskbarFrameSize_Original) {
+        for (auto& b : g_verticalButtons) {
+            TaskListButton_TaskbarFrameSize_Original(b.taskListButton,
+                                                     buttonSize);
+        }
+    }
+}
+
 using TaskbarController_UpdateFrameHeight_t = void(WINAPI*)(void* pThis);
 TaskbarController_UpdateFrameHeight_t
     TaskbarController_UpdateFrameHeight_Original;
@@ -11085,6 +11128,7 @@ void WINAPI TaskbarController_UpdateFrameHeight_Hook(void* pThis) {
                     winrt::put_abi(frameElement));
                 // A vertical frame is given a width, a horizontal one a height.
                 if (frameElement && !std::isnan(frameElement.Width())) {
+                    TrackVerticalElement(g_verticalFrames, frameElement);
                     double width = macdock::GetTaskbarThickness();
                     Wh_Log(L"Vertical frame width: %f->%f",
                            frameElement.Width(), width);
@@ -11161,6 +11205,14 @@ void WINAPI SystemTrayFrame_Width_Hook(void* pThis, double value) {
     if (g_inSystemTrayController_UpdateFrameSize && !std::isnan(value) &&
         !g_unloading && IsVerticalTaskbar()) {
         value = macdock::GetTaskbarThickness();
+        try {
+            FrameworkElement tray = nullptr;
+            (*(IUnknown**)pThis)
+                ->QueryInterface(winrt::guid_of<FrameworkElement>(),
+                                 winrt::put_abi(tray));
+            if (tray) TrackVerticalElement(g_verticalTrayFrames, tray);
+        } catch (...) {
+        }
     }
     SystemTrayFrame_Width_Original(pThis, value);
 }
@@ -11168,9 +11220,6 @@ void WINAPI SystemTrayFrame_Width_Hook(void* pThis, double value) {
 // On a vertical taskbar Windows sizes the icon area of each button with the
 // taskbar width. Give it the width of the dock button instead, so the icon and
 // the dot sit centered in the dock.
-using TaskListButton_TaskbarFrameSize_t = void(WINAPI*)(void* pThis,
-                                                        double frameSize);
-TaskListButton_TaskbarFrameSize_t TaskListButton_TaskbarFrameSize_Original;
 void WINAPI TaskListButton_TaskbarFrameSize_Hook(void* pThis,
                                                  double frameSize) {
     if (!g_unloading && IsVerticalTaskbar()) {
@@ -11187,6 +11236,18 @@ void WINAPI TaskListButton_TaskbarFrameSize_Hook(void* pThis,
             // Not for buttons in the overflow flyout.
             if (!parent || parent.Name() == L"TaskbarFrameRepeater") {
                 frameSize = macdock::GetPx(L"dockHeight") - 2;
+                if (element) {
+                    std::erase_if(g_verticalButtons,
+                                  [](auto& b) { return !b.element.get(); });
+                    bool known = false;
+                    for (auto& b : g_verticalButtons) {
+                        if (b.element.get() == element) known = true;
+                    }
+                    if (!known) {
+                        g_verticalButtons.push_back(
+                            {winrt::make_weak(element), pThis});
+                    }
+                }
             }
         } catch (...) {
             HRESULT hr = winrt::to_hresult();
@@ -13270,6 +13331,24 @@ void SettingsChanged() {
     LoadSettings();
 
     ApplySettings(g_settings.taskbarHeight);
+
+    // The vertical taskbar takes its width only when it's created, so resize
+    // it and its buttons directly when the size slider moves.
+    if (IsVerticalTaskbar()) {
+        if (HWND hTaskbarWnd = FindCurrentProcessTaskbarWnd()) {
+            RunFromWindowThread(
+                hTaskbarWnd,
+                [](PVOID) {
+                    try {
+                        UpdateVerticalSizes();
+                    } catch (...) {
+                        HRESULT hr = winrt::to_hresult();
+                        Wh_Log(L"Error %08X", hr);
+                    }
+                },
+                nullptr);
+        }
+    }
 }
 
 }  // namespace taskbarheight
