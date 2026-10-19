@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.8.1
+// @version         1.8.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9390,18 +9390,20 @@ void ApplyDockSettings() {
         dotStyles.push_back(L"VerticalAlignment=Bottom");
         dotStyles.push_back(L"HorizontalAlignment=Center");
     } else {
-        // Same as at the bottom, turned by 90°: the icon panel is exactly as
-        // wide as the dock button (see TaskListButton_TaskbarFrameSize_Hook),
-        // so the dot sits at its screen-edge side, moved out by the offset.
-        // The button cuts off anything outside of it, so the dot can't be
-        // pushed out past the button edge like at the bottom.
-        int inset = std::max(0, -dotOffset);
-        dotStyles.push_back(rightEdge ? Fmt(L"Margin=0,0,%d,0", inset)
-                                      : Fmt(L"Margin=%d,0,0,0", inset));
+        // The dot sits next to the icon on the screen-edge side, with a small
+        // gap like below the icon at the bottom ("Indicator offset" changes
+        // it). Icon and dot are both centered in the button, so it's placed
+        // from the center, but never past the button edge, which cuts it off.
+        double shift = iconSize / 2.0 + dotSize / 2.0 + 1 + dotOffset;
+        double maxShift = (dockHeight - 2) / 2.0 - dotSize / 2.0;
+        if (shift > maxShift) shift = maxShift;
+        if (shift < 0) shift = 0;
+        if (!rightEdge) shift = -shift;
+        dotStyles.push_back(L"Margin=0");
         dotStyles.push_back(L"VerticalAlignment=Center");
-        dotStyles.push_back(rightEdge ? L"HorizontalAlignment=Right"
-                                      : L"HorizontalAlignment=Left");
-        // Windows puts the indicator of a vertical button in its own column.
+        dotStyles.push_back(L"HorizontalAlignment=Center");
+        dotStyles.push_back(L"RenderTransform:=<TranslateTransform X=\"" +
+                            FormatDip(shift) + L"\" />");
         dotStyles.push_back(L"Grid.Column=0");
         dotStyles.push_back(L"Grid.ColumnSpan=10");
     }
