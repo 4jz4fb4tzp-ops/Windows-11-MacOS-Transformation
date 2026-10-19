@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.5.1
+// @version         1.6
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9343,12 +9343,6 @@ void ApplyDockSettings() {
         std::vector<std::wstring> frameStyles{
             vertical ? L"VerticalAlignment=Center" : L"HorizontalAlignment=Center",
             L"Margin=0"};
-        // The native vertical taskbar takes its width from this frame. Give
-        // it the same thickness the taskbar has at the bottom, so the dock
-        // keeps all its sizes and spacing.
-        if (vertical) {
-            frameStyles.push_back(Fmt(L"Width=%d", GetTaskbarThickness()));
-        }
         Rule(L"Taskbar.TaskbarFrame#TaskbarFrame", frameStyles);
     }
     // On secondary / smaller monitors Windows can give the TaskbarFrame more
@@ -10950,7 +10944,9 @@ void WINAPI SystemTrayController_UpdateFrameSize_Hook(void* pThis) {
     Wh_Log(L">");
 
     if (IsVerticalTaskbar()) {
+        g_inSystemTrayController_UpdateFrameSize = true;
         SystemTrayController_UpdateFrameSize_Original(pThis);
+        g_inSystemTrayController_UpdateFrameSize = false;
         return;
     }
 
@@ -11068,6 +11064,30 @@ void WINAPI TaskbarController_UpdateFrameHeight_Hook(void* pThis) {
 
     if (IsVerticalTaskbar()) {
         TaskbarController_UpdateFrameHeight_Original(pThis);
+
+        // The native vertical taskbar is as wide as this frame. Give it the
+        // thickness the taskbar has at the bottom, so the dock keeps all its
+        // sizes on the side too.
+        LONG offset = GetTaskbarFrameOffset();
+        void* frame = offset ? *(void**)((BYTE*)pThis + offset) : nullptr;
+        if (frame && !g_unloading) {
+            try {
+                FrameworkElement frameElement = nullptr;
+                ((IUnknown**)frame)[1]->QueryInterface(
+                    winrt::guid_of<FrameworkElement>(),
+                    winrt::put_abi(frameElement));
+                // A vertical frame is given a width, a horizontal one a height.
+                if (frameElement && !std::isnan(frameElement.Width())) {
+                    double width = macdock::GetTaskbarThickness();
+                    Wh_Log(L"Vertical frame width: %f->%f",
+                           frameElement.Width(), width);
+                    frameElement.Width(width);
+                }
+            } catch (...) {
+                HRESULT hr = winrt::to_hresult();
+                Wh_Log(L"Error %08X", hr);
+            }
+        }
         return;
     }
 
@@ -11125,6 +11145,48 @@ void WINAPI SystemTraySecondaryController_UpdateFrameSize_Hook(void* pThis) {
     SystemTraySecondaryController_UpdateFrameSize_Original(pThis);
 
     g_inSystemTrayController_UpdateFrameSize = false;
+}
+
+// The vertical tray frame gets a width, which must match the wider taskbar.
+using SystemTrayFrame_Width_t = void(WINAPI*)(void* pThis, double value);
+SystemTrayFrame_Width_t SystemTrayFrame_Width_Original;
+void WINAPI SystemTrayFrame_Width_Hook(void* pThis, double value) {
+    if (g_inSystemTrayController_UpdateFrameSize && !std::isnan(value) &&
+        !g_unloading && IsVerticalTaskbar()) {
+        value = macdock::GetTaskbarThickness();
+    }
+    SystemTrayFrame_Width_Original(pThis, value);
+}
+
+// On a vertical taskbar Windows sizes the icon area of each button with the
+// taskbar width. Give it the width of the dock button instead, so the icon and
+// the dot sit centered in the dock.
+using TaskListButton_TaskbarFrameSize_t = void(WINAPI*)(void* pThis,
+                                                        double frameSize);
+TaskListButton_TaskbarFrameSize_t TaskListButton_TaskbarFrameSize_Original;
+void WINAPI TaskListButton_TaskbarFrameSize_Hook(void* pThis,
+                                                 double frameSize) {
+    if (!g_unloading && IsVerticalTaskbar()) {
+        try {
+            FrameworkElement element = nullptr;
+            ((IUnknown*)pThis + 3)
+                ->QueryInterface(winrt::guid_of<FrameworkElement>(),
+                                 winrt::put_abi(element));
+            FrameworkElement parent = nullptr;
+            if (element) {
+                parent = Media::VisualTreeHelper::GetParent(element)
+                             .try_as<FrameworkElement>();
+            }
+            // Not for buttons in the overflow flyout.
+            if (!parent || parent.Name() == L"TaskbarFrameRepeater") {
+                frameSize = macdock::GetPx(L"dockHeight") - 2;
+            }
+        } catch (...) {
+            HRESULT hr = winrt::to_hresult();
+            Wh_Log(L"Error %08X", hr);
+        }
+    }
+    TaskListButton_TaskbarFrameSize_Original(pThis, frameSize);
 }
 
 using SystemTrayFrame_Height_t = void(WINAPI*)(void* pThis, double value);
@@ -12473,6 +12535,12 @@ bool HookSystemTraySymbols(HMODULE module) {
             true,  // From Windows 11 version 22H2.
         },
         {
+            {LR"(public: __cdecl winrt::impl::consume_Windows_UI_Xaml_IFrameworkElement<struct winrt::SystemTray::SystemTrayFrame>::Width(double)const )"},
+            &SystemTrayFrame_Width_Original,
+            SystemTrayFrame_Width_Hook,
+            true,  // Only used by the vertical taskbar.
+        },
+        {
             {LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::SystemTray::implementation::SystemTrayFrame,struct winrt::Windows::UI::Xaml::IFrameworkElementOverrides>::MeasureOverride(struct winrt::Windows::Foundation::Size,struct winrt::Windows::Foundation::Size *))"},
             &SystemTrayFrame_MeasureOverride_Original,
             SystemTrayFrame_MeasureOverride_Hook,
@@ -12670,6 +12738,12 @@ bool HookTaskbarViewDllSymbols(HMODULE module,
                 TaskListButton_UpdateVisualStates_Hook,
             },
             {
+                {LR"(public: void __cdecl winrt::Taskbar::implementation::TaskListButton::TaskbarFrameSize(double))"},
+                &TaskListButton_TaskbarFrameSize_Original,
+                TaskListButton_TaskbarFrameSize_Hook,
+                true,  // Only in builds with the native vertical taskbar.
+            },
+            {
                 {LR"(public: void __cdecl winrt::Microsoft::Windows::Taskbar::implementation::TaskbarComponentHost::IconHeight(double))"},
                 &TaskbarComponentHost_IconHeight_Original,
                 nullptr,
@@ -12743,6 +12817,12 @@ bool HookTaskbarViewDllSymbols(HMODULE module,
             &SystemTrayFrame_Height_Original,
             SystemTrayFrame_Height_Hook,
             true,  // From Windows 11 version 22H2.
+        },
+        {
+            {LR"(public: __cdecl winrt::impl::consume_Windows_UI_Xaml_IFrameworkElement<struct winrt::SystemTray::SystemTrayFrame>::Width(double)const )"},
+            &SystemTrayFrame_Width_Original,
+            SystemTrayFrame_Width_Hook,
+            true,  // Only used by the vertical taskbar.
         },
         {
             {LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::SystemTray::implementation::SystemTrayFrame,struct winrt::Windows::UI::Xaml::IFrameworkElementOverrides>::MeasureOverride(struct winrt::Windows::Foundation::Size,struct winrt::Windows::Foundation::Size *))"},
