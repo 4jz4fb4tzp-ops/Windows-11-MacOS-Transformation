@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.7.1
+// @version         1.7.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -11087,6 +11087,77 @@ using TaskListButton_TaskbarFrameSize_t = void(WINAPI*)(void* pThis,
                                                         double frameSize);
 TaskListButton_TaskbarFrameSize_t TaskListButton_TaskbarFrameSize_Original;
 
+// Writes the layout of the vertical taskbar to MacOs-Dock\dock-debug.txt
+// (next to the icon folder), to find out what limits the dock length.
+void DumpElement(FILE* f, FrameworkElement e, int depth) {
+    if (!e || depth > 14) return;
+    std::wstring cls(winrt::get_class_name(e));
+    std::wstring name(e.Name());
+    double ox = 0, oy = 0;
+    try {
+        auto pt = e.TransformToVisual(nullptr).TransformPoint({0, 0});
+        ox = pt.X; oy = pt.Y;
+    } catch (...) {
+    }
+    auto m = e.Margin();
+    fwprintf(f,
+             L"%*ls%ls#%ls pos=%.0f,%.0f actual=%.0fx%.0f W=%.0f H=%.0f "
+             L"MaxW=%.0f MaxH=%.0f margin=%.0f,%.0f,%.0f,%.0f vis=%d\n",
+             depth * 2, L"", cls.c_str(), name.c_str(), ox, oy,
+             e.ActualWidth(), e.ActualHeight(), e.Width(), e.Height(),
+             e.MaxWidth(), e.MaxHeight(), m.Left, m.Top, m.Right, m.Bottom,
+             (int)e.Visibility());
+    // Task buttons are many and alike; only list the first two.
+    int n = Media::VisualTreeHelper::GetChildrenCount(e);
+    int buttons = 0;
+    for (int i = 0; i < n; i++) {
+        auto c = Media::VisualTreeHelper::GetChild(e, i)
+                     .try_as<FrameworkElement>();
+        if (!c) continue;
+        if (winrt::get_class_name(c) == L"Taskbar.TaskListButton" &&
+            ++buttons > 2) {
+            continue;
+        }
+        DumpElement(f, c, depth + 1);
+    }
+    if (buttons > 2) {
+        fwprintf(f, L"%*ls(%d task buttons in total)\n", (depth + 1) * 2, L"",
+                 buttons);
+    }
+}
+
+void DumpVerticalTaskbar() {
+    FrameworkElement frame = nullptr;
+    for (auto& w : g_verticalFrames) {
+        if ((frame = w.get())) break;
+    }
+    if (!frame) return;
+    FrameworkElement root = frame;
+    while (auto parent = Media::VisualTreeHelper::GetParent(root)
+                             .try_as<FrameworkElement>()) {
+        root = parent;
+    }
+    std::wstring folder = macdock::GetStr(L"iconFolder");
+    WCHAR expanded[MAX_PATH * 2];
+    DWORD len = ExpandEnvironmentStringsW(folder.c_str(), expanded,
+                                          ARRAYSIZE(expanded));
+    if (len > 0 && len <= ARRAYSIZE(expanded)) folder = expanded;
+    while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/'))
+        folder.pop_back();
+    size_t slash = folder.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return;
+    std::wstring path = folder.substr(0, slash) + L"\\dock-debug.txt";
+    FILE* f = _wfopen(path.c_str(), L"w, ccs=UTF-8");
+    if (!f) return;
+    APPBARDATA abd{.cbSize = sizeof(abd)};
+    SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
+    fwprintf(f, L"taskbar rect=%ld,%ld,%ld,%ld edge=%u dpi=%u\n", abd.rc.left,
+             abd.rc.top, abd.rc.right, abd.rc.bottom, abd.uEdge,
+             GetDpiForWindow(FindWindowW(L"Shell_TrayWnd", nullptr)));
+    DumpElement(f, root, 0);
+    fclose(f);
+}
+
 // Runs on the taskbar thread after the settings changed.
 void UpdateVerticalSizes() {
     double thickness = macdock::GetTaskbarThickness();
@@ -13350,6 +13421,12 @@ void SettingsChanged() {
                 [](PVOID) {
                     try {
                         UpdateVerticalSizes();
+                    } catch (...) {
+                        HRESULT hr = winrt::to_hresult();
+                        Wh_Log(L"Error %08X", hr);
+                    }
+                    try {
+                        DumpVerticalTaskbar();
                     } catch (...) {
                         HRESULT hr = winrt::to_hresult();
                         Wh_Log(L"Error %08X", hr);
