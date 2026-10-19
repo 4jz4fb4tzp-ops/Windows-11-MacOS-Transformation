@@ -177,6 +177,7 @@ add an entry under *Advanced → Apps and icons* with:
   
 ## Changelog
 
+- **Changed (macOS Dock 1.5):** on the left or right the taskbar now gets the same width as its height at the bottom, so the dock keeps all sizes and spacing and the size slider works exactly as at the bottom. The automatic shrinking from 1.4 was removed.
 - **New (macOS Dock 1.4):** on the left or right the dock shrinks automatically when not all apps fit on the screen, instead of hiding them behind "…". Separator icons (file name contains "separator") are turned by 90° there.
 - **New (macOS Dock 1.3):** choose **Left**, **Bottom** or **Right** under *Position* in the Dock Settings app. It moves the Windows taskbar, restarts Explorer and the dock keeps its look on the side (it shrinks proportionally to fit the narrower taskbar).
 - **Fixed (macOS Dock 1.2.1, Top Menu Bar 0.31.2):** with the dock on the left or right, the icons were cut off and the menu bar was shifted. Icons now shrink to fit the taskbar width and the menu bar always spans the full screen width.
