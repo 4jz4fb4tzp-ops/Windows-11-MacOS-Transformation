@@ -713,10 +713,25 @@ function Show-DockPosition {
     $ui.PosBottom.IsChecked = ($p -ne 0 -and $p -ne 2)
     $script:loading = $false
 }
+# The "Taskbar Icon Separators" mod draws its separator as a vertical line.
+# On the left or right it has to lie flat, so turn it by 90°.
+function Set-SeparatorRotation([int]$deg) {
+    $sepModPath = 'SOFTWARE\Windhawk\Engine\Mods\taskbar-icon-separators'
+    $modKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($sepModPath, $true)
+    if (-not $modKey) { return }
+    try {
+        $key = $modKey.CreateSubKey('Settings')
+        try { $key.SetValue('iconRotation', $deg, [Microsoft.Win32.RegistryValueKind]::DWord) } finally { $key.Close() }
+        $t = [int]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -band 0x7fffffff)
+        $modKey.SetValue('SettingsChangeTime', $t, [Microsoft.Win32.RegistryValueKind]::DWord)
+    } finally { $modKey.Close() }
+}
+
 function Set-DockPosition([int]$p, [string]$name) {
     if ($script:loading -or (Get-DockPosition) -eq $p) { return }
     try {
         Set-ItemProperty -Path $TaskbarKey -Name TaskbarLocation -Value $p -Type DWord
+        try { Set-SeparatorRotation $(if ($p -eq 3) { 0 } else { 90 }) } catch {}
         $ui.Status.Text = "Moving the dock to the $name …"
         $window.Dispatcher.Invoke([action]{}, 'Render')
         Restart-Explorer
@@ -729,6 +744,14 @@ $ui.PosLeft.Add_Checked({ Set-DockPosition 0 'left' })
 $ui.PosBottom.Add_Checked({ Set-DockPosition 3 'bottom' })
 $ui.PosRight.Add_Checked({ Set-DockPosition 2 'right' })
 Show-DockPosition
+# Bring the separator rotation in line with the current position.
+try {
+    $want = $(if ((Get-DockPosition) -in 0, 2) { 90 } else { 0 })
+    $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Windhawk\Engine\Mods\taskbar-icon-separators\Settings')
+    $cur = if ($k) { [int]$k.GetValue('iconRotation', 0) } else { $null }
+    if ($k) { $k.Close() }
+    if ($cur -ne $null -and $cur -ne $want) { Set-SeparatorRotation $want }
+} catch {}
 
 $window.Add_Closing({ if ($saveTimer.IsEnabled) { $saveTimer.Stop(); try { Write-State $state } catch {} } })
 
