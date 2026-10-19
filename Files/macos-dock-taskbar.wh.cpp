@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.6.1
+// @version         1.6.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9435,6 +9435,13 @@ void ApplyDockSettings() {
         Rule(L"Taskbar.TaskListButton > Grid#IconPanel, "
              L"Taskbar.TaskListButton > Taskbar.TaskListLabeledButtonPanel#IconPanel",
              {Fmt(L"Width=%d", dockHeight - 2), L"HorizontalAlignment=Center"});
+        // The icon sits in a column sized for the Windows icon, which is
+        // narrower than the dock icons and cuts them off on the right. Let it
+        // span the whole button and center it.
+        Rule(L"Taskbar.TaskListButton > Grid#IconPanel > Image#Icon, "
+             L"Taskbar.TaskListButton > Taskbar.TaskListLabeledButtonPanel#IconPanel > Image#Icon",
+             {L"Grid.Column=0", L"Grid.ColumnSpan=10",
+              L"HorizontalAlignment=Center", L"VerticalAlignment=Center"});
     } else {
         Rule(L"Taskbar.TaskListButton", {Fmt(L"Width=%d", buttonWidth), L"Margin=0"});
     }
