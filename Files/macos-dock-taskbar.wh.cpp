@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.10
+// @version         1.11
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -138,7 +138,9 @@ code from the **TranslucentTB** project.
     distance between dot and icon.
 - dotOffsetX: 0
   $name: Indicator – offset left/right (px)
-  $description: Positive = to the right, negative = to the left
+  $description: >-
+    Positive = to the right, negative = to the left. With the dock on the
+    right it's mirrored automatically.
 - dotActiveColor: "#FFFFFFFF"
   $name: Indicator – active color
 - dotInactiveColor: "#B0FFFFFF"
@@ -9415,8 +9417,9 @@ void ApplyDockSettings() {
         if (shift > maxShift) shift = maxShift;
         if (shift < 0) shift = 0;
         if (!rightEdge) shift = -shift;
-        // Extra left/right offset in screen direction, still kept inside.
-        shift += dotOffsetX;
+        // Extra left/right offset, mirrored on the right edge so the same
+        // value looks the same on both sides. Still kept inside the button.
+        shift += rightEdge ? -dotOffsetX : dotOffsetX;
         if (shift > maxShift) shift = maxShift;
         if (shift < -maxShift) shift = -maxShift;
         dotStyles.push_back(L"Margin=0");
@@ -11757,8 +11760,51 @@ thread_local double g_taskListButtonCustomIconHeight;
 
 using TaskListButton_UpdateVisualStates_t = void(WINAPI*)(void* pThis);
 TaskListButton_UpdateVisualStates_t TaskListButton_UpdateVisualStates_Original;
+// Separators of the "Taskbar Icon Separators" mod are narrow at the bottom
+// (that mod limits their width). On the left or right they'd get the full
+// button length, so limit their height to the same separator width there.
+double GetSeparatorModWidth() {
+    DWORD value = 0, size = sizeof(value);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Windhawk\\Engine\\Mods\\taskbar-icon-separators\\Settings",
+                     L"width", RRF_RT_REG_DWORD, nullptr, &value,
+                     &size) != ERROR_SUCCESS ||
+        value == 0) {
+        return 20;
+    }
+    return value;
+}
+
+void UpdateVerticalSeparator(void* pThis) {
+    FrameworkElement element = nullptr;
+    ((IUnknown*)pThis + 3)
+        ->QueryInterface(winrt::guid_of<FrameworkElement>(),
+                         winrt::put_abi(element));
+    if (!element) return;
+    std::wstring name(
+        Automation::AutomationProperties::GetName(element).c_str());
+    if (name.find(L".8F31A7D2.") == std::wstring::npos) return;
+    static double width = GetSeparatorModWidth();
+    if (!g_unloading && IsVerticalTaskbar()) {
+        if (element.MaxHeight() != width) element.MaxHeight(width);
+        // That mod's width limit would make the line on the side too short.
+        if (element.MaxWidth() == width) {
+            element.MaxWidth(std::numeric_limits<double>::infinity());
+        }
+    } else if (element.MaxHeight() == width) {
+        element.ClearValue(FrameworkElement::MaxHeightProperty());
+    }
+}
+
 void WINAPI TaskListButton_UpdateVisualStates_Hook(void* pThis) {
     Wh_Log(L">");
+
+    try {
+        UpdateVerticalSeparator(pThis);
+    } catch (...) {
+        HRESULT hr = winrt::to_hresult();
+        Wh_Log(L"Error %08X", hr);
+    }
 
     if (TaskListButton_UpdateIconColumnDefinition_Original &&
         (g_applyingSettings || g_taskbarButtonWidthCustomized)) {
