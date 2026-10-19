@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.9
+// @version         1.10
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -133,7 +133,12 @@ code from the **TranslucentTB** project.
   $name: Indicator – dot size (px)
 - dotOffset: 1
   $name: Indicator – offset down (px)
-  $description: Positive = lower, negative = higher
+  $description: >-
+    Positive = lower, negative = higher. With the dock on the left or right:
+    distance between dot and icon.
+- dotOffsetX: 0
+  $name: Indicator – offset left/right (px)
+  $description: Positive = to the right, negative = to the left
 - dotActiveColor: "#FFFFFFFF"
   $name: Indicator – active color
 - dotInactiveColor: "#B0FFFFFF"
@@ -9313,6 +9318,7 @@ void ApplyDockSettings() {
     int iconOffsetY = GetPx(L"iconOffsetY");
     int dotSize = GetPx(L"dotSize");
     int dotOffset = GetPx(L"dotOffset");
+    int dotOffsetX = GetPx(L"dotOffsetX");
     std::wstring dotActive = GetStr(L"dotActiveColor");
     std::wstring dotInactive = GetStr(L"dotInactiveColor");
     std::wstring dotAttention = GetStr(L"dotAttentionColor");
@@ -9397,6 +9403,8 @@ void ApplyDockSettings() {
         dotStyles.push_back(Fmt(L"Margin=0,0,0,%d", -dotOffset));
         dotStyles.push_back(L"VerticalAlignment=Bottom");
         dotStyles.push_back(L"HorizontalAlignment=Center");
+        dotStyles.push_back(L"RenderTransform:=<TranslateTransform X=\"" +
+                            std::to_wstring(dotOffsetX) + L"\" />");
     } else {
         // The dot sits next to the icon on the screen-edge side, with a small
         // gap like below the icon at the bottom ("Indicator offset" changes
@@ -9407,6 +9415,10 @@ void ApplyDockSettings() {
         if (shift > maxShift) shift = maxShift;
         if (shift < 0) shift = 0;
         if (!rightEdge) shift = -shift;
+        // Extra left/right offset in screen direction, still kept inside.
+        shift += dotOffsetX;
+        if (shift > maxShift) shift = maxShift;
+        if (shift < -maxShift) shift = -maxShift;
         dotStyles.push_back(L"Margin=0");
         dotStyles.push_back(L"VerticalAlignment=Center");
         dotStyles.push_back(L"HorizontalAlignment=Center");

@@ -58,7 +58,8 @@ $NumberDefs = @(
     @{K='nativeIconSize'; L='Other icon size (0 = default)'; Min=0; Max=64;  G='Icons'; D=29}
     @{K='iconOffsetY';    L='Icon position (+ = lower)';  Min=-10; Max=10;  G='Icons'; D=1}
     @{K='dotSize';        L='Dot size';                    Min=2;   Max=10;  G='Indicator'; D=4}
-    @{K='dotOffset';      L='Dot offset (+ = lower)';      Min=-8;  Max=10;  G='Indicator'; D=1}
+    @{K='dotOffset';      L='Dot offset (+ = lower / further from icon)'; Min=-8; Max=10; G='Indicator'; D=1}
+    @{K='dotOffsetX';     L='Dot offset left/right (+ = right)'; Min=-20; Max=20; G='Indicator'; D=0}
 )
 $TextDefs = @(
     @{K='tintColor';         L='Tint, light mode (#AARRGGBB)'; D='#10FFFFFF'}
