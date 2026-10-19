@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.5
+// @version         1.5.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9388,18 +9388,28 @@ void ApplyDockSettings() {
 
     // Running indicator as a dot.
     std::wstring r = FormatDip(dotSize / 2.0);
-    Rule(L"Grid#IconPanel@RunningIndicatorStates > Rectangle#RunningIndicator, "
-         L"Taskbar.TaskListLabeledButtonPanel@RunningIndicatorStates > Rectangle#RunningIndicator",
-         {Fmt(L"Width=%d", dotSize), Fmt(L"Height=%d", dotSize),
-          L"RadiusX=" + r, L"RadiusY=" + r,
-          !vertical ? Fmt(L"Margin=0,0,0,%d", -dotOffset)
-          : rightEdge ? Fmt(L"Margin=0,0,%d,0", -dotOffset)
-                      : Fmt(L"Margin=%d,0,0,0", -dotOffset),
-          !vertical ? L"VerticalAlignment=Bottom" : L"VerticalAlignment=Center",
-          !vertical ? L"HorizontalAlignment=Center"
-          : rightEdge ? L"HorizontalAlignment=Right"
-                      : L"HorizontalAlignment=Left",
-          Fmt(L"Height@ActiveRunningIndicator=%d", dotSize),
+    std::vector<std::wstring> dotStyles{
+        Fmt(L"Width=%d", dotSize), Fmt(L"Height=%d", dotSize),
+        L"RadiusX=" + r, L"RadiusY=" + r};
+    if (!vertical) {
+        dotStyles.push_back(Fmt(L"Margin=0,0,0,%d", -dotOffset));
+        dotStyles.push_back(L"VerticalAlignment=Bottom");
+        dotStyles.push_back(L"HorizontalAlignment=Center");
+    } else {
+        // Windows keeps the icon panel as wide as the taskbar, so a dot at its
+        // edge would drift away from the icon when the dock gets smaller.
+        // Place it from the icon center instead, at exactly the distance it
+        // has at the bottom: half the button + offset - half the dot.
+        double shift = (dockHeight - 2) / 2.0 + dotOffset - dotSize / 2.0;
+        if (!rightEdge) shift = -shift;
+        dotStyles.push_back(L"Margin=0");
+        dotStyles.push_back(L"VerticalAlignment=Center");
+        dotStyles.push_back(L"HorizontalAlignment=Center");
+        dotStyles.push_back(
+            L"RenderTransform:=<TranslateTransform X=\"" + FormatDip(shift) + L"\" />");
+    }
+    for (const auto& st : std::initializer_list<std::wstring>{
+             Fmt(L"Height@ActiveRunningIndicator=%d", dotSize),
           Fmt(L"Height@InactiveRunningIndicator=%d", dotSize),
           Fmt(L"Height@RequestingAttentionRunningIndicator=%d", dotSize),
           L"Fill=" + dotInactive,
@@ -9407,7 +9417,12 @@ void ApplyDockSettings() {
           L"Fill@ActiveRunningIndicator=" + dotActive,
           Fmt(L"Width@InactiveRunningIndicator=%d", dotSize),
           Fmt(L"Width@RequestingAttentionRunningIndicator=%d", dotSize),
-          L"Fill@RequestingAttentionRunningIndicator=" + dotAttention});
+          L"Fill@RequestingAttentionRunningIndicator=" + dotAttention}) {
+        dotStyles.push_back(st);
+    }
+    Rule(L"Grid#IconPanel@RunningIndicatorStates > Rectangle#RunningIndicator, "
+         L"Taskbar.TaskListLabeledButtonPanel@RunningIndicatorStates > Rectangle#RunningIndicator",
+         dotStyles);
 
     if (hideHover) {
         Rule(L"Taskbar.ExperienceToggleButton#LaunchListButton > Taskbar.TaskListButtonPanel#ExperienceToggleButtonRootPanel > Grid > Border#BackgroundElement",
