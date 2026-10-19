@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.7.2
+// @version         1.8
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -10699,8 +10699,7 @@ double WINAPI SystemTrayController_GetFrameSize_Hook(void* pThis,
                                                      int enumTaskbarSize) {
     Wh_Log(L"> %d", enumTaskbarSize);
 
-    if (!IsVerticalTaskbar() && g_taskbarHeight &&
-        (enumTaskbarSize == 1 || enumTaskbarSize == 2)) {
+    if (g_taskbarHeight && (enumTaskbarSize == 1 || enumTaskbarSize == 2)) {
         return g_taskbarHeight;
     }
 
@@ -10716,7 +10715,7 @@ SystemTraySecondaryController_GetFrameSize_Hook(void* pThis,
                                                 int enumTaskbarSize) {
     Wh_Log(L"> %d", enumTaskbarSize);
 
-    if (!IsVerticalTaskbar() && g_taskbarHeight &&
+    if (g_taskbarHeight &&
         (enumTaskbarSize == 1 || enumTaskbarSize == 2)) {
         return g_taskbarHeight;
     }
@@ -10737,8 +10736,9 @@ double WINAPI TaskbarConfiguration_GetFrameSize_Hook(int enumTaskbarSize) {
             TaskbarConfiguration_GetFrameSize_Original(enumTaskbarSize);
     }
 
-    if (!IsVerticalTaskbar() && g_taskbarHeight &&
-        (enumTaskbarSize == 1 || enumTaskbarSize == 2)) {
+    // On the left or right the frame size is the taskbar width, which gets
+    // the same thickness as at the bottom.
+    if (g_taskbarHeight && (enumTaskbarSize == 1 || enumTaskbarSize == 2)) {
         return g_taskbarHeight;
     }
 
@@ -10831,7 +10831,7 @@ void WINAPI Event_operator_call_Hook(void* pThis) {
                 *g_TaskbarConfiguration_UpdateFrameSize_frameSize;
         }
 
-        if (!IsVerticalTaskbar() && g_taskbarHeight) {
+        if (g_taskbarHeight) {
             *g_TaskbarConfiguration_UpdateFrameSize_frameSize = g_taskbarHeight;
         }
     }
@@ -11430,6 +11430,15 @@ int WINAPI TaskbarFrame_MeasureOverride_Hook(
     g_hookCallCounter++;
 
     Wh_Log(L">");
+
+    // Windows keeps a large part of a vertical taskbar free for the tray and
+    // moves the remaining apps behind "…", even though the tray is hidden.
+    // Measure with a practically unlimited length, so all apps stay in the
+    // dock.
+    if (macdock::IsVerticalEdge(macdock::g_cachedEdge) && !g_unloading &&
+        size.Height > 0) {
+        size.Height = std::max(size.Height, 20000.0f);
+    }
 
     int ret = TaskbarFrame_MeasureOverride_Original(pThis, size, resultSize);
 
@@ -12424,7 +12433,23 @@ auto WINAPI SHAppBarMessage_Hook(DWORD dwMessage, PAPPBARDATA pData) {
     auto ret = SHAppBarMessage_Original(dwMessage, pData);
 
     // This is used to position secondary taskbars.
-    if (dwMessage == ABM_QUERYPOS && ret && !IsVerticalTaskbar() &&
+    if (dwMessage == ABM_QUERYPOS && ret && g_taskbarHeight &&
+        (pData->uEdge == ABE_LEFT || pData->uEdge == ABE_RIGHT)) {
+        // Vertical taskbar: reserve the dock thickness as its width.
+        HMONITOR monitor = (HMONITOR)GetProp(pData->hWnd, L"TaskbarMonitor");
+        UINT dpiX = 0, dpiY = 0;
+        if (monitor) {
+            GetDpiForMonitor(monitor, MDT_DEFAULT, &dpiX, &dpiY);
+        }
+        if (dpiX) {
+            int w = MulDiv(g_taskbarHeight, dpiX, 96);
+            if (pData->uEdge == ABE_LEFT) {
+                pData->rc.right = pData->rc.left + w;
+            } else {
+                pData->rc.left = pData->rc.right - w;
+            }
+        }
+    } else if (dwMessage == ABM_QUERYPOS && ret && !IsVerticalTaskbar() &&
         g_taskbarHeight) {
         Wh_Log(L">");
 
