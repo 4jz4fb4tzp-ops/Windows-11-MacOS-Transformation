@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.6
+// @version         1.6.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9390,17 +9390,17 @@ void ApplyDockSettings() {
         dotStyles.push_back(L"VerticalAlignment=Bottom");
         dotStyles.push_back(L"HorizontalAlignment=Center");
     } else {
-        // Windows keeps the icon panel as wide as the taskbar, so a dot at its
-        // edge would drift away from the icon when the dock gets smaller.
-        // Place it from the icon center instead, at exactly the distance it
-        // has at the bottom: half the button + offset - half the dot.
-        double shift = (dockHeight - 2) / 2.0 + dotOffset - dotSize / 2.0;
-        if (!rightEdge) shift = -shift;
-        dotStyles.push_back(L"Margin=0");
+        // Same as at the bottom, turned by 90°: the icon panel is exactly as
+        // wide as the dock button (see TaskListButton_TaskbarFrameSize_Hook),
+        // so the dot sits at its screen-edge side, moved out by the offset.
+        dotStyles.push_back(rightEdge ? Fmt(L"Margin=0,0,%d,0", -dotOffset)
+                                      : Fmt(L"Margin=%d,0,0,0", -dotOffset));
         dotStyles.push_back(L"VerticalAlignment=Center");
-        dotStyles.push_back(L"HorizontalAlignment=Center");
-        dotStyles.push_back(
-            L"RenderTransform:=<TranslateTransform X=\"" + FormatDip(shift) + L"\" />");
+        dotStyles.push_back(rightEdge ? L"HorizontalAlignment=Right"
+                                      : L"HorizontalAlignment=Left");
+        // Windows puts the indicator of a vertical button in its own column.
+        dotStyles.push_back(L"Grid.Column=0");
+        dotStyles.push_back(L"Grid.ColumnSpan=10");
     }
     for (const auto& st : std::initializer_list<std::wstring>{
              Fmt(L"Height@ActiveRunningIndicator=%d", dotSize),
