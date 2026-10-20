@@ -9,13 +9,29 @@
 #   -ResetSettings   overwrite the settings of mods that are already installed
 #   -All             install the optional mods without asking
 #   -NoPrompt        don't ask anything, use the defaults
+#   -IconPack <path> ZIP file or folder with the macOS icons
+#   -Optional <ids>  comma-separated optional mods to install ("none" = none)
+#   -Gui             used by Setup.exe: no questions, progress as "@@" lines
 
 param(
     [switch]$ResetSettings,
     [switch]$All,
     [switch]$NoPrompt,
-    [switch]$Elevated
+    [switch]$Elevated,
+    [string]$IconPack = '',
+    [string]$Optional = '',
+    [switch]$Gui
 )
+
+if ($Gui) {
+    $NoPrompt = $true
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+}
+
+# Progress for Setup.exe: one line per event, e.g. "@@STEP|mods".
+function Send-Gui([string]$line) {
+    if ($Gui) { [Console]::Out.WriteLine('@@' + $line); [Console]::Out.Flush() }
+}
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -27,6 +43,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     if ($ResetSettings) { $argList += '-ResetSettings' }
     if ($All) { $argList += '-All' }
     if ($NoPrompt) { $argList += '-NoPrompt' }
+    if ($IconPack) { $argList += @('-IconPack', "`"$IconPack`"") }
+    if ($Optional) { $argList += @('-Optional', $Optional) }
     Start-Process powershell.exe -Verb RunAs -ArgumentList $argList
     exit
 }
@@ -104,6 +122,7 @@ if (-not (Test-Path $manifestPath)) { throw "mods.json not found next to Setup.p
 $manifest = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
 # ---------------------------------------------------------------- 1. Project folder
+Send-Gui 'STEP|project'
 Write-Step "Copying the project to $TargetRoot"
 $sameFolder = (Resolve-Path $RepoRoot).Path.TrimEnd('\') -ieq $TargetRoot.TrimEnd('\')
 if ($sameFolder) {
@@ -121,15 +140,18 @@ $IconsDir = Join-Path $TargetRoot 'Icons'
 New-Item -ItemType Directory -Path $IconsDir -Force | Out-Null
 
 # ---------------------------------------------------------------- 2. Icons
+Send-Gui 'STEP|icons'
 Write-Step 'macOS icons'
 $iconCount = @(Get-ChildItem $IconsDir -File -Include *.png, *.ico -Recurse -ErrorAction SilentlyContinue).Count
-if ($iconCount -gt 0) {
-    Write-Ok "$iconCount icons found in the Icons folder."
-} elseif (-not $NoPrompt) {
-    Write-Info 'The macOS icons are not included (Apple copyright). If you already downloaded an'
-    Write-Info 'icon pack, drag the ZIP file or folder into this window and press Enter.'
-    Write-Info 'Press Enter without a path to skip - you can copy them into the Icons folder later.'
-    $iconSource = (Read-Host '    Icon pack').Trim().Trim('"')
+if ($IconPack -or ($iconCount -eq 0 -and -not $NoPrompt)) {
+    if ($IconPack) {
+        $iconSource = $IconPack.Trim().Trim('"')
+    } else {
+        Write-Info 'The macOS icons are not included (Apple copyright). If you already downloaded an'
+        Write-Info 'icon pack, drag the ZIP file or folder into this window and press Enter.'
+        Write-Info 'Press Enter without a path to skip - you can copy them into the Icons folder later.'
+        $iconSource = (Read-Host '    Icon pack').Trim().Trim('"')
+    }
     if ($iconSource -and (Test-Path $iconSource)) {
         $iconRoot = $iconSource
         if ((Get-Item $iconSource) -is [System.IO.FileInfo]) {
@@ -145,9 +167,12 @@ if ($iconCount -gt 0) {
     } else {
         Write-Warn 'Skipped. The dock works without them, but shows the Windows icons.'
     }
+} elseif ($iconCount -gt 0) {
+    Write-Ok "$iconCount icons found in the Icons folder."
 }
 
 # ---------------------------------------------------------------- 3. Windhawk
+Send-Gui 'STEP|windhawk'
 Write-Step 'Windhawk'
 function Find-Windhawk {
     $candidates = New-Object System.Collections.ArrayList
@@ -369,7 +394,12 @@ $selected = New-Object System.Collections.ArrayList
 $optional = @($manifest.mods | Where-Object { $_.optional })
 if ($optional.Count -gt 0) {
     Write-Step 'Optional mods'
+    $chosen = @($Optional -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     foreach ($mod in $optional) {
+        if ($Optional) {
+            if ($chosen -contains $mod.id) { [void]$selected.Add($mod); Write-Ok "Selected: $($mod.name)" }
+            continue
+        }
         $default = [bool]$All -or ($mod.id -eq 'three-finger-drag')
         if ($All -or (Ask-YesNo $mod.question $default)) { [void]$selected.Add($mod) }
     }
@@ -378,12 +408,14 @@ foreach ($mod in $manifest.mods) { if (-not $mod.optional) { [void]$selected.Add
 $selected = @($selected | Sort-Object { if ($_.source -eq 'local') { 0 } else { 1 } })
 
 # ---------------------------------------------------------------- 5. Install mods
+Send-Gui 'STEP|mods'
 Write-Step 'Installing mods (the custom mods are compiled, this can take a few minutes)'
 $profileVersions = @{}
 $i = 0
 foreach ($mod in $selected) {
     $i++
     $regId = if ($mod.source -eq 'local') { "local@$($mod.id)" } else { $mod.id }
+    Send-Gui ("MOD|{0}|{1}|{2}" -f $i, $selected.Count, $mod.name)
     Write-Host ("    [{0,2}/{1}] {2} {3} ... " -f $i, $selected.Count, $mod.name, $mod.version) -NoNewline
     try {
         $dllName = New-DllName $regId $mod.version
@@ -415,10 +447,12 @@ foreach ($mod in $selected) {
         $result = Write-ModConfig $regId $mod $dllName
         Remove-OldDlls $regId $dllName
         Write-Host "OK ($result)" -ForegroundColor Green
+        Send-Gui "MODOK|$($mod.name)"
     } catch {
         Write-Host 'FAILED' -ForegroundColor Red
         Write-Warn $_.Exception.Message
         [void]$script:Failed.Add($mod.name)
+        Send-Gui "MODFAIL|$($mod.name)|$($_.Exception.Message -replace '[\r\n]+', ' ')"
     }
 }
 if ($profileVersions.Count) { Set-ProfileVersions $profileVersions }
@@ -433,6 +467,7 @@ foreach ($id in $manifest.conflicting) {
 }
 
 # ---------------------------------------------------------------- 6. Windows taskbar settings
+Send-Gui 'STEP|taskbar'
 Write-Step 'Taskbar settings (centered, no search box, no task view, no widgets)'
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
 foreach ($pair in @(@($adv, 'TaskbarAl', 1), @($adv, 'ShowTaskViewButton', 0), @($adv, 'TaskbarDa', 0),
@@ -445,6 +480,7 @@ foreach ($pair in @(@($adv, 'TaskbarAl', 1), @($adv, 'ShowTaskViewButton', 0), @
 Write-Ok 'Done.'
 
 # ---------------------------------------------------------------- 7. Trash shortcut
+Send-Gui 'STEP|trash'
 Write-Step 'Trash shortcut'
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $TargetRoot 'Files\Trash.ps1') -NoPause | Out-Null
@@ -452,6 +488,7 @@ try {
 } catch { Write-Warn "Could not create the Trash shortcut: $($_.Exception.Message)" }
 
 # ---------------------------------------------------------------- 8. Restart
+Send-Gui 'STEP|restart'
 Write-Step 'Restarting Windhawk and Explorer'
 try { Start-Process (Join-Path $WindhawkDir 'windhawk.exe') -ArgumentList '-restart -tray-only -timeout 60000' -Wait } catch { Write-Warn 'Please restart Windhawk manually.' }
 Start-Sleep 2
@@ -460,6 +497,7 @@ Start-Sleep 2
 if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
 Write-Ok 'Done.'
 
+Send-Gui ("DONE|" + ($script:Failed -join ', '))
 Write-Host ''
 if ($script:Failed.Count) {
     Write-Host "  Setup finished with errors. Not installed: $($script:Failed -join ', ')" -ForegroundColor Yellow
@@ -474,6 +512,7 @@ Write-Host '   - Right-click an app in the dock -> "Change icon ..." for apps th
 } catch {
     Write-Host ''
     Write-Host "  Setup failed: $($_.Exception.Message)" -ForegroundColor Red
+    Send-Gui ("FAIL|" + ($_.Exception.Message -replace '[\r\n]+', ' '))
 } finally {
     Remove-Item $TempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

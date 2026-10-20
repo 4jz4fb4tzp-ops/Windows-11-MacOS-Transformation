@@ -14,12 +14,15 @@ the icons from there.
 ```
 Documents\MacOs-Dock\
 ├── README.md
-├── Setup.cmd                      One-click setup
+├── Setup.exe                      Setup with a window (recommended)
+├── Setup.cmd                      Same setup in the console
 ├── setup\                         Setup script and mod list (mods.json)
+├── tools\                         Build scripts (setup-exe = source of Setup.exe)
 ├── Icons\                         put your icons here (not included, see below)
 └── Files\
     ├── macos-dock-taskbar.wh.cpp  Windhawk mod: macOS Dock
     ├── top-menubar.wh.cpp         Windhawk mod: Top Menu Bar
+    ├── stage-manager-taskbar-aware.wh.cpp Windhawk mod: Stage Manager
     ├── macos-minimize-animation-dock.wh.cpp Windhawk mod: genie animation (fork)
     ├── macos-traffic-lights.wh.cpp Windhawk mod: macOS Traffic Lights
     ├── three-finger-drag.wh.cpp   Windhawk mod: Three Finger Drag
@@ -33,23 +36,27 @@ Documents\MacOs-Dock\
 
 1. Download this repository (**Code → Download ZIP**) and extract it anywhere.
 2. Optional: download a macOS icon pack (see [Icons](#icons)).
-3. Double-click **`Setup.cmd`** and confirm the admin prompt.
+3. Double-click **`Setup.exe`** and confirm the admin prompt.
+4. Choose the optional mods and your icon pack (ZIP or folder, or drag it into
+   the window), then click **Install**.
+
+`Setup.cmd` runs the same setup in a console window, if you prefer that.
 
 The setup does everything else automatically:
 
 - installs **Windhawk** if it isn't installed yet
 - copies the project to `Documents\MacOs-Dock` and imports your icon pack
-  (drag the ZIP into the setup window when it asks)
 - installs all catalog mods listed below with the recommended settings
-- compiles and installs the custom mods (macOS Dock, Top Menu Bar, and
-  optionally Three Finger Drag and Turbo Boost Tray Toggle)
+- compiles and installs the custom mods (macOS Dock, Top Menu Bar, genie
+  animation, and optionally Stage Manager, Three Finger Drag and Turbo Boost
+  Tray Toggle)
 - disables mods that conflict with the dock, centers the taskbar and hides
   search, task view and widgets
 - creates the Trash shortcut and restarts Windhawk and Explorer
 
 Compiling the custom mods takes a few minutes. Mods that are already installed
-keep their settings; run `Setup.cmd -ResetSettings` to apply the recommended
-settings again. After the setup, pin `Files\Trash.lnk` to the taskbar and
+keep their settings; turn on **Reset settings** in `Setup.exe` (or run
+`Setup.cmd -ResetSettings`) to apply the recommended settings again. After the setup, pin `Files\Trash.lnk` to the taskbar and
 right-click the apps in the dock → **Change icon …** to assign icons.
 
 The manual steps below do the same by hand.
@@ -117,6 +124,7 @@ These mods are not in the catalog. Install each one like this:
 | `macos-dock-taskbar.wh.cpp` | **macOS Dock** | Required |
 | `top-menubar.wh.cpp` | **Top Menu Bar** | Optional |
 | `macos-minimize-animation-dock.wh.cpp` | **MacOS Minimize Animation (Dock left/right)** | Genie minimize animation, also works with the dock on the left/right. Fork of *MacOS Minimize Animation* by Abdullah Masood; disable the original if you have it |
+| `stage-manager-taskbar-aware.wh.cpp` | **Stage Manager (taskbar aware)** | Optional, recent windows as cards next to the active window (Win+Alt+S). Toggle it from the Control Center in the Top Menu Bar |
 | `three-finger-drag.wh.cpp` | **Three Finger Drag (macOS-Style)** | Optional, drag with three fingers on a Precision Touchpad (laptops only) |
 | `turbo-boost-tray-toggle.wh.cpp` | **Turbo Boost Tray Toggle** | Optional, tray icon to turn CPU Turbo Boost on/off |
 
@@ -178,6 +186,8 @@ with:
   
 ## Changelog
 
+- **New:** `Setup.exe`, a setup with a window: pick the optional mods and the icon pack, then watch the progress of every step. `Setup.cmd` still works.
+- **New:** Stage Manager mod (`stage-manager-taskbar-aware.wh.cpp`) and Top Menu Bar 0.32.0 with a Stage Manager tile in the Control Center.
 - **New:** `macos-minimize-animation-dock.wh.cpp`, a fork of *MacOS Minimize Animation* whose genie flows sideways into the dock when it's on the left or right. The setup installs it instead of the catalog mod and disables the original.
 - **New (macOS Dock 2.0):** right-click any app in the dock for a menu with **Show jump list**, **Change icon …**, **Use Windows icon** and **Dock settings …**. The new settings window lives inside the mod (same style as the Top Menu Bar settings, no admin prompt) and replaces the old PowerShell Dock Settings app. Your old settings are taken over automatically. The separator is turned by the dock itself now.
 - **Changed (macOS Dock 1.12):** new installs start with the author's tuned settings, separately for bottom and left/right. No custom app icons are preset anymore, so every app keeps its Windows icon until you pick one with **Choose icon …** in the Dock Settings app.

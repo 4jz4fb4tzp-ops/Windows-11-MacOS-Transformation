@@ -218,7 +218,7 @@
     {
       "id": "macos-dock-taskbar",
       "name": "macOS Dock",
-      "version": "2.0",
+      "version": "2.0.4",
       "include": [
         "explorer.exe"
       ],
@@ -271,7 +271,7 @@
     {
       "id": "top-menubar",
       "name": "Top Menu Bar",
-      "version": "0.31.2",
+      "version": "0.32.0",
       "include": [
         "explorer.exe"
       ],
@@ -309,6 +309,31 @@
       "file": "macos-minimize-animation-dock.wh.cpp",
       "optional": false,
       "question": null
+    },
+    {
+      "id": "stage-manager-taskbar-aware",
+      "name": "Stage Manager (macOS-Stil)",
+      "version": "2.3.3",
+      "include": [
+        "explorer.exe"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-ldwmapi -lshell32 -lgdi32 -luser32 -ladvapi32 -lole32 -luuid -lwindowscodecs",
+      "settings": {
+        "cardWidth": 150,
+        "maxWindows": 5,
+        "side": "auto",
+        "dockIcons": 1,
+        "tilt": 1,
+        "moveAside": 1,
+        "hotkey": 1,
+        "trayIcon": 1
+      },
+      "source": "local",
+      "file": "stage-manager-taskbar-aware.wh.cpp",
+      "optional": true,
+      "question": "Install Stage Manager (recent windows as cards next to the active window, Win+Alt+S)?"
     },
     {
       "id": "three-finger-drag",

@@ -42,6 +42,7 @@ LOCAL_MODS = {
     # Fork of the catalog mod "MacOS Minimize Animation" that also supports a
     # dock on the left/right. Replaces the original (see CONFLICTING_MODS).
     "macos-minimize-animation-dock.wh.cpp": ({}, False, None),
+    "stage-manager-taskbar-aware.wh.cpp": ({}, True, "Install Stage Manager (recent windows as cards next to the active window, Win+Alt+S)?"),
     "three-finger-drag.wh.cpp": ({}, True, "Install Three Finger Drag (laptops with a Precision Touchpad)?"),
     "turbo-boost-tray-toggle.wh.cpp": ({}, True, "Install Turbo Boost Tray Toggle (tray icon to turn CPU Turbo Boost on/off)?"),
 }

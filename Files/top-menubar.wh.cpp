@@ -2,7 +2,7 @@
 // @id              top-menubar
 // @name            Top Menu Bar
 // @description     macOS-style menu bar at the top of the screen with app menus, status items and Control Center
-// @version         0.31.2
+// @version         0.32.0
 // @author          Okan
 // @include         explorer.exe
 // @compilerOptions -lshell32 -lgdi32 -luser32 -lversion -lole32 -lwlanapi -liphlpapi -lcomctl32 -lcomdlg32 -ladvapi32 -ldwmapi -lgdiplus -lbthprops -luxtheme
@@ -43,6 +43,7 @@ Each item opens its own menu on click (or on hover, if enabled):
 - **Battery** (fill turns green while charging, yellow in energy saver, red when low), **keyboard layout, system** (CPU, RAM, drives)
 - **Tray:** all tray icons; click, right-click and double-click are passed to the app
 - **Control Center:** tiles for Wi-Fi, Bluetooth, media playback, lock,
+  Stage Manager on/off (when the *Stage Manager* mod is running),
   screenshot, project, night light, notifications, plus sound and battery
 
 Scroll over the speaker to change the volume, middle-click to mute.
@@ -4110,6 +4111,19 @@ std::wstring CurrentSsid() {
     return ssid;
 }
 
+// ---------- Stage Manager (Mod "Stage Manager (macOS-Stil)") ----------
+// Steuerung über das Fenster des Stage-Manager-Mods:
+// wParam 0 = Status, 1 = an, 2 = aus, 3 = umschalten; Rückgabe 1 = an, 0 = aus
+HWND StageManagerWnd() { return FindWindowW(L"WhStageManagerTray", nullptr); }
+
+int StageManagerCmd(WPARAM cmd) {
+    HWND w = StageManagerWnd();
+    if (!w) return -1;
+    DWORD_PTR r = 0;
+    if (!SendMessageTimeoutW(w, WM_APP + 30, cmd, 0, SMTO_ABORTIFHUNG, cmd ? 6000 : 800, &r)) return -1;
+    return (int)r;
+}
+
 void BuildControlMenuCards(std::vector<Row>& rows) {
     g_popupW = 330;
     std::wstring ssid = CurrentSsid();
@@ -4134,6 +4148,14 @@ void BuildControlMenuCards(std::vector<Row>& rows) {
         {100, 0, 60, 60, 1, 0xE713, L"", L"", false, [] { OpenUri(L"ms-settings:"); }, 1},
         {170, 0, 150, 60, 0, 0xEA8F, L"Mitteilungen", L"Win+N", false, [] { PressCombo({VK_LWIN, 'N'}); }, 1},
     }));
+    int sm = StageManagerCmd(0);
+    if (sm >= 0) {
+        rows.push_back(Spacer(10));
+        rows.push_back(TileRow(60, {
+            {10, 0, 150, 60, 0, 0xE7C4, L"Stage Manager", sm ? L"Ein" : L"Aus", sm == 1,
+             [] { StageManagerCmd(3); }, 2},
+        }));
+    }
     if (g_st.hasAudio) {
         rows.push_back(Sep());
         rows.push_back(Header(L"Ton"));
@@ -4171,6 +4193,12 @@ void BuildControlMenu(std::vector<Row>& rows) {
     rows.push_back(Item(L"WLAN", [] { OpenUri(L"ms-availablenetworks:"); }, 0xE701, wl));
     rows.push_back(Item(L"Bluetooth", [] { OpenUri(L"ms-settings:bluetooth"); }, 0xE702));
     rows.push_back(Item(L"Benachrichtigungen", [] { PressCombo({VK_LWIN, 'N'}); }, 0xEA8F, L"Win+N"));
+    int sm = StageManagerCmd(0);
+    if (sm >= 0) {
+        Row r = Item(L"Stage Manager", [] { StageManagerCmd(3); }, 0xE7C4, L"Win+Alt+S");
+        r.checked = sm == 1;
+        rows.push_back(r);
+    }
     if (g_st.hasAudio) {
         rows.push_back(Sep());
         rows.push_back(Header(L"Ton"));
