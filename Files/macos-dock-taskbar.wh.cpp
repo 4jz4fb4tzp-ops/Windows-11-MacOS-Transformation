@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.1
+// @version         2.0.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -11977,22 +11977,24 @@ double GetSeparatorModWidth() {
 // "Use Windows icon" and "Dock settings…". Windows routes a right-click on a
 // taskbar button through one of these functions, depending on the build.
 // ---------------------------------------------------------------------------
+// The event args are only passed through: their layout differs between
+// Windows builds, and touching them crashes explorer on some.
 using TaskListButton_OnContextRequested_t = void(WINAPI*)(
     void* pThis,
     UIElement const& sender,
-    Input::ContextRequestedEventArgs const& args);
+    void* args);
 TaskListButton_OnContextRequested_t TaskListButton_OnContextRequested_Original;
 
 using TaskListButtonHandlers_HandleContextRequested_t = void(WINAPI*)(
     UIElement const& sender,
-    Input::ContextRequestedEventArgs const& args);
+    void* args);
 TaskListButtonHandlers_HandleContextRequested_t
     TaskListButtonHandlers_HandleContextRequested_Original;
 
 using TaskbarResources_OnTaskListButtonContextRequested_t = void(WINAPI*)(
     void* pThis,
     UIElement const& sender,
-    Input::ContextRequestedEventArgs const& args);
+    void* args);
 TaskbarResources_OnTaskListButtonContextRequested_t
     TaskbarResources_OnTaskListButtonContextRequested_Original;
 
@@ -12024,39 +12026,32 @@ void DockTrace(const wchar_t* step) {
 }
 
 std::atomic<bool> g_dockMenuOpen;
-bool g_dockMenuPassThrough;  // taskbar thread only
 winrt::weak_ref<Controls::MenuFlyout> g_dockMenu;
 
-struct DockMenuRequest {
-    int route;
-    void* pThis;
-    UIElement sender{nullptr};
-    Input::ContextRequestedEventArgs args{nullptr};
-};
+// "Show jump list": the original right-click handling has to run while the
+// event is still going on, so the menu repeats the right-click at the same
+// spot and lets the next one through.
+std::atomic<bool> g_dockMenuPassNext;
+POINT g_dockMenuPoint;
 
-void CallOriginalContextRoute(const DockMenuRequest& r) {
-    g_dockMenuPassThrough = true;
-    try {
-        r.args.Handled(false);
-        switch (r.route) {
-            case 0:
-                TaskListButton_OnContextRequested_Original(r.pThis, r.sender,
-                                                           r.args);
-                break;
-            case 1:
-                TaskListButtonHandlers_HandleContextRequested_Original(r.sender,
-                                                                       r.args);
-                break;
-            case 2:
-                TaskbarResources_OnTaskListButtonContextRequested_Original(
-                    r.pThis, r.sender, r.args);
-                break;
-        }
-    } catch (...) {
-        HRESULT hr = winrt::to_hresult();
-        Wh_Log(L"Error %08X", hr);
-    }
-    g_dockMenuPassThrough = false;
+void ShowJumpListAgain() {
+    HANDLE t = CreateThread(
+        nullptr, 0,
+        [](LPVOID) -> DWORD {
+            Sleep(120);  // let the menu close first
+            g_dockMenuPassNext = true;
+            SetCursorPos(g_dockMenuPoint.x, g_dockMenuPoint.y);
+            INPUT in[2] = {};
+            in[0].type = in[1].type = INPUT_MOUSE;
+            in[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+            in[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+            SendInput(2, in, sizeof(INPUT));
+            Sleep(1500);
+            g_dockMenuPassNext = false;  // in case nothing arrived
+            return 0;
+        },
+        nullptr, 0, nullptr);
+    if (t) CloseHandle(t);
 }
 
 bool IsSeparatorButton(FrameworkElement const& element) {
@@ -12107,11 +12102,9 @@ Controls::MenuFlyoutItem MakeDockMenuItem(const wchar_t* text,
     return item;
 }
 
-bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
-    DockTrace((L"TryShowDockMenu route " + std::to_wstring(request.route) +
-               (element ? L" element" : L" no element"))
-                  .c_str());
-    if (g_unloading || g_dockMenuPassThrough || !element) {
+bool TryShowDockMenu(FrameworkElement const& element) {
+    DockTrace(element ? L"TryShowDockMenu element" : L"TryShowDockMenu no element");
+    if (g_unloading || !element) {
         return false;
     }
     DockTrace((L"class " + std::wstring(winrt::get_class_name(element))).c_str());
@@ -12121,10 +12114,15 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
     }
     // Several routes can report the same right-click; only the first one
     // opens the menu, the others are just swallowed.
+    if (g_dockMenuPassNext.exchange(false)) {
+        DockTrace(L"pass through to jump list");
+        return false;
+    }
     if (g_dockMenuOpen.exchange(true)) {
         DockTrace(L"already open");
         return true;
     }
+    GetCursorPos(&g_dockMenuPoint);
 
     try {
         bool de = UseGermanUi();
@@ -12142,9 +12140,9 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
 
         auto jump = MakeDockMenuItem(de ? L"Sprungliste anzeigen" : L"Show jump list",
                                      L"\uE8FD");
-        jump.Click([request](auto&&, auto&&) {
+        jump.Click([](auto&&, auto&&) {
             g_dockMenuOpen = false;
-            CallOriginalContextRoute(request);
+            ShowJumpListAgain();
         });
         menu.Items().Append(jump);
 
@@ -12192,8 +12190,6 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
         DockTrace(L"ShowAt");
         menu.ShowAt(element);
         DockTrace(L"shown");
-        request.args.Handled(true);
-        DockTrace(L"handled");
     } catch (...) {
         g_dockMenuOpen = false;
         HRESULT hr = winrt::to_hresult();
@@ -12204,37 +12200,28 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
     return true;
 }
 
-void WINAPI TaskListButton_OnContextRequested_Hook(
-    void* pThis,
-    UIElement const& sender,
-    Input::ContextRequestedEventArgs const& args) {
+void WINAPI TaskListButton_OnContextRequested_Hook(void* pThis,
+                                                   UIElement const& sender,
+                                                   void* args) {
     DockTrace(L"hook route 0");
-    FrameworkElement element = sender.try_as<FrameworkElement>();
-    DockTrace(element ? L"route 0 sender ok" : L"route 0 no sender");
-    if (TryShowDockMenu(element, {0, pThis, sender, args})) return;
+    if (TryShowDockMenu(sender.try_as<FrameworkElement>())) return;
     TaskListButton_OnContextRequested_Original(pThis, sender, args);
 }
 
 void WINAPI TaskListButtonHandlers_HandleContextRequested_Hook(
     UIElement const& sender,
-    Input::ContextRequestedEventArgs const& args) {
+    void* args) {
     DockTrace(L"hook route 1");
-    if (TryShowDockMenu(sender.try_as<FrameworkElement>(),
-                        {1, nullptr, sender, args})) {
-        return;
-    }
+    if (TryShowDockMenu(sender.try_as<FrameworkElement>())) return;
     TaskListButtonHandlers_HandleContextRequested_Original(sender, args);
 }
 
 void WINAPI TaskbarResources_OnTaskListButtonContextRequested_Hook(
     void* pThis,
     UIElement const& sender,
-    Input::ContextRequestedEventArgs const& args) {
+    void* args) {
     DockTrace(L"hook route 2");
-    if (TryShowDockMenu(sender.try_as<FrameworkElement>(),
-                        {2, pThis, sender, args})) {
-        return;
-    }
+    if (TryShowDockMenu(sender.try_as<FrameworkElement>())) return;
     TaskbarResources_OnTaskListButtonContextRequested_Original(pThis, sender,
                                                                args);
 }
