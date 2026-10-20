@@ -20,6 +20,7 @@ Documents\MacOs-Dock\
 └── Files\
     ├── macos-dock-taskbar.wh.cpp  Windhawk mod: macOS Dock
     ├── top-menubar.wh.cpp         Windhawk mod: Top Menu Bar
+    ├── macos-minimize-animation-dock.wh.cpp Windhawk mod: genie animation (fork)
     ├── macos-traffic-lights.wh.cpp Windhawk mod: macOS Traffic Lights
     ├── three-finger-drag.wh.cpp   Windhawk mod: Three Finger Drag
     ├── turbo-boost-tray-toggle.wh.cpp Windhawk mod: Turbo Boost Tray Toggle
@@ -93,7 +94,6 @@ the settings under **Details → Settings**.
 |---|---|
 | **Resource Redirect** | *Icon theme*: `macOS Blue (by niivu)`, *Disable folder thumbnails*: on, *Redirect all loaded resources*: on |
 | **Custom Window Corner Radius** | *Corner radius*: `12`, *Small corner radius*: `6` |
-| **MacOS Minimize Animation** | Defaults are fine |
 | **Taskbar Dock Animation Plus** | *Animation curve*: `0`, *Maximum scale*: `110`, *Effect radius*: `100`, rest default |
 | **Windows 11 File Explorer Styler** | *Theme*: `Minimal Explorer11`, rest default |
 | **Taskbar Icon Separators** | Defaults are fine |
@@ -116,6 +116,7 @@ These mods are not in the catalog. Install each one like this:
 |---|---|---|
 | `macos-dock-taskbar.wh.cpp` | **macOS Dock** | Required |
 | `top-menubar.wh.cpp` | **Top Menu Bar** | Optional |
+| `macos-minimize-animation-dock.wh.cpp` | **MacOS Minimize Animation (Dock left/right)** | Genie minimize animation, also works with the dock on the left/right. Fork of *MacOS Minimize Animation* by Abdullah Masood; disable the original if you have it |
 | `three-finger-drag.wh.cpp` | **Three Finger Drag (macOS-Style)** | Optional, drag with three fingers on a Precision Touchpad (laptops only) |
 | `turbo-boost-tray-toggle.wh.cpp` | **Turbo Boost Tray Toggle** | Optional, tray icon to turn CPU Turbo Boost on/off |
 
@@ -172,11 +173,12 @@ with:
 ## Known issues
 
 - Missing icons on first start: every app shows its Windows icon at first. Right-click each app in the dock → **Change icon …**.
-- Minimize animation with the dock on the left or right: the *MacOS Minimize Animation* mod is made for a dock at the bottom, so minimizing and restoring windows looks glitchy when the dock is on the left or right.
+- Minimize animation with the dock on the left or right: use the included fork **MacOS Minimize Animation (Dock left/right)** instead of the catalog mod. The *Classic* animation style only works at the bottom; on the left/right the fork always uses the *Modern* style.
 
   
 ## Changelog
 
+- **New:** `macos-minimize-animation-dock.wh.cpp`, a fork of *MacOS Minimize Animation* whose genie flows sideways into the dock when it's on the left or right. The setup installs it instead of the catalog mod and disables the original.
 - **New (macOS Dock 2.0):** right-click any app in the dock for a menu with **Show jump list**, **Change icon …**, **Use Windows icon** and **Dock settings …**. The new settings window lives inside the mod (same style as the Top Menu Bar settings, no admin prompt) and replaces the old PowerShell Dock Settings app. Your old settings are taken over automatically. The separator is turned by the dock itself now.
 - **Changed (macOS Dock 1.12):** new installs start with the author's tuned settings, separately for bottom and left/right. No custom app icons are preset anymore, so every app keeps its Windows icon until you pick one with **Choose icon …** in the Dock Settings app.
 - **New (macOS Dock 1.9):** bottom and left/right keep separate settings in the Dock Settings app; changes only apply to the current position. On the left or right the size goes up to 100%.
@@ -209,6 +211,9 @@ GPL-3.0, see [LICENSE](LICENSE).
 - **macOS Dock** is based on *Windows 11 Taskbar Styler* and *Taskbar height and
   icon size* by m417z (GPL v3). The `WindhawkBlur` brush is based on code from
   the TranslucentTB project.
-- **Resource Redirect**, **Custom Window Corner Radius** by m417z;
-  **MacOS Minimize Animation** by Abdullah Masood (Windhawk catalog).
+- **Resource Redirect**, **Custom Window Corner Radius** by m417z (Windhawk
+  catalog).
+- **MacOS Minimize Animation (Dock left/right)** is a fork of *MacOS Minimize
+  Animation* by Abdullah Masood with the genie engine by Potassiumuncher (MIT);
+  only the left/right dock support was added.
 - Top Menu Bar, macOS Traffic Lights, dock settings window: Okan.

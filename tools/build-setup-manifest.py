@@ -25,7 +25,6 @@ CATALOG_MODS = {
         "allResourceRedirect": 1,
     },
     "custom-corner-radius": {"radius": 12, "smallRadius": 6},
-    "macos-minimize-animation": {},
     "taskbar-dock-animation-plus": {"AnimationType": 0, "MaxScale": 110, "EffectRadius": 100},
     "windows-11-file-explorer-styler": {"theme": "Minimal Explorer11"},
     "taskbar-icon-separators": {},
@@ -40,12 +39,15 @@ CATALOG_MODS = {
 LOCAL_MODS = {
     "macos-dock-taskbar.wh.cpp": ({}, False, None),
     "top-menubar.wh.cpp": ({}, False, None),
+    # Fork of the catalog mod "MacOS Minimize Animation" that also supports a
+    # dock on the left/right. Replaces the original (see CONFLICTING_MODS).
+    "macos-minimize-animation-dock.wh.cpp": ({}, False, None),
     "three-finger-drag.wh.cpp": ({}, True, "Install Three Finger Drag (laptops with a Precision Touchpad)?"),
     "turbo-boost-tray-toggle.wh.cpp": ({}, True, "Install Turbo Boost Tray Toggle (tray icon to turn CPU Turbo Boost on/off)?"),
 }
 
 # Mods that conflict with macOS Dock and get disabled if installed.
-CONFLICTING_MODS = ["windows-11-taskbar-styler", "taskbar-icon-size", "taskbar-dock-animation"]
+CONFLICTING_MODS = ["windows-11-taskbar-styler", "taskbar-icon-size", "taskbar-dock-animation", "macos-minimize-animation"]
 
 
 class JsonLikeLoader(yaml.SafeLoader):

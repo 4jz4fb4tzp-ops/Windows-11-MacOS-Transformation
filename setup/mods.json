@@ -42,29 +42,6 @@
       "source": "catalog"
     },
     {
-      "id": "macos-minimize-animation",
-      "name": "MacOS Minimize Animation",
-      "version": "3.1.6",
-      "include": [
-        "*"
-      ],
-      "exclude": [],
-      "architecture": [],
-      "compilerOptions": "-ldwmapi -lgdi32 -ld2d1 -lole32 -loleaut32 -luuid -lshell32",
-      "settings": {
-        "duration_ms": 450,
-        "open_animation": 1,
-        "launch_animation": 0,
-        "multi_monitor": 0,
-        "unhide_taskbar": 1,
-        "unhide_duration_ms": 450,
-        "engine": "modern",
-        "tile_count": 35,
-        "excluded_programs[0]": ""
-      },
-      "source": "catalog"
-    },
-    {
       "id": "taskbar-dock-animation-plus",
       "name": "Taskbar Dock Animation Plus",
       "version": "2.0.1",
@@ -308,6 +285,32 @@
       "question": null
     },
     {
+      "id": "macos-minimize-animation-dock",
+      "name": "MacOS Minimize Animation (Dock left/right)",
+      "version": "3.1.7-dock.1",
+      "include": [
+        "*"
+      ],
+      "exclude": [],
+      "architecture": [],
+      "compilerOptions": "-ldwmapi -lgdi32 -ld2d1 -lole32 -loleaut32 -luuid -lshell32",
+      "settings": {
+        "duration_ms": 450,
+        "open_animation": 1,
+        "launch_animation": 0,
+        "multi_monitor": 0,
+        "unhide_taskbar": 1,
+        "unhide_duration_ms": 450,
+        "engine": "modern",
+        "tile_count": 35,
+        "excluded_programs[0]": ""
+      },
+      "source": "local",
+      "file": "macos-minimize-animation-dock.wh.cpp",
+      "optional": false,
+      "question": null
+    },
+    {
       "id": "three-finger-drag",
       "name": "Three Finger Drag (macOS-Style)",
       "version": "1.0",
@@ -347,6 +350,7 @@
   "conflicting": [
     "windows-11-taskbar-styler",
     "taskbar-icon-size",
-    "taskbar-dock-animation"
+    "taskbar-dock-animation",
+    "macos-minimize-animation"
   ]
 }
