@@ -184,11 +184,11 @@ std::wstring ReadUtf8File(const std::wstring& path) {
 // German questions for the optional mods (mods.json has English ones).
 std::wstring GermanQuestion(const std::wstring& id, const std::wstring& fallback) {
     if (id == L"stage-manager-taskbar-aware")
-        return L"Zuletzt benutzte Fenster als Karten neben dem aktiven Fenster (Win+Alt+S).";
+        return L"Fenster als Karten neben dem aktiven Fenster, Win+Alt+S";
     if (id == L"three-finger-drag")
-        return L"Mit drei Fingern ziehen, wie am Mac (nur Laptops mit Precision-Touchpad).";
+        return L"Mit drei Fingern ziehen, nur Laptops mit Touchpad";
     if (id == L"turbo-boost-tray-toggle")
-        return L"Symbol im Infobereich, um den CPU-Turbo-Boost ein- und auszuschalten.";
+        return L"CPU-Turbo-Boost per Symbol im Infobereich schalten";
     return fallback;
 }
 
@@ -520,12 +520,12 @@ void PaintContent(Gdiplus::Graphics& g, HDC dc, RECT rc) {
         PaintCard(g, ResetRect());
         RECT ir = IconRowRect();
         PaintCard(g, ir);
-        DrawLabel(dc, T(L"macOS-Icon-Paket", L"macOS icon pack"), {ir.left + S(16), ir.top + S(8), ir.right - S(250), ir.top + S(30)},
+        DrawLabel(dc, T(L"macOS-Icon-Paket", L"macOS icon pack"), {ir.left + S(16), ir.top + S(8), ir.right - S(214), ir.top + S(30)},
                  g_fontBold, C.text, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         std::wstring sub = g_iconPack.empty()
-                               ? T(L"Optional: ZIP oder Ordner wählen oder hierher ziehen", L"Optional: choose or drop a ZIP or folder")
+                               ? T(L"Optional, auch per Drag & Drop", L"Optional, drag & drop works too")
                                : g_iconPack.substr(g_iconPack.find_last_of(L"\\/") + 1);
-        DrawLabel(dc, sub, {ir.left + S(16), ir.top + S(30), ir.right - S(250), ir.bottom - S(6)}, g_fontSmall,
+        DrawLabel(dc, sub, {ir.left + S(16), ir.top + S(30), ir.right - S(214), ir.bottom - S(6)}, g_fontSmall,
                  g_iconPack.empty() ? C.sub : C.accent, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     } else if (g_page == P_INSTALL || g_page == P_FINISH) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -636,7 +636,8 @@ void DrawOwner(const DRAWITEMSTRUCT* d) {
     int id = (int)d->CtlID;
     bool isToggle = id >= ID_OPT0 || id == ID_RESET;
     RECT lr{0, 0, w, h};
-    FillRect(mem, &lr, isToggle ? g_brCard : g_brBg);
+    bool onCard = id == ID_ICONS || id == ID_ICONFOLDER;
+    FillRect(mem, &lr, onCard ? g_brCard : g_brBg);
     {
         Gdiplus::Graphics g(mem);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -644,6 +645,7 @@ void DrawOwner(const DRAWITEMSTRUCT* d) {
         bool pressed = d->itemState & ODS_SELECTED;
         bool disabled = d->itemState & ODS_DISABLED;
         if (isToggle) {
+            PaintCard(g, lr);
             bool on;
             std::wstring label, sub;
             if (id == ID_RESET) {
@@ -670,17 +672,19 @@ void DrawOwner(const DRAWITEMSTRUCT* d) {
             bool primary = id == ID_NEXT;
             wchar_t text[64];
             GetWindowTextW(d->hwndItem, text, 64);
-            COLORREF fill = primary ? C.accent : C.card;
+            COLORREF fill = primary  ? C.accent
+                            : onCard ? (C.dark ? RGB(64, 64, 68) : RGB(236, 236, 240))
+                                     : (C.dark ? RGB(56, 56, 60) : RGB(255, 255, 255));
             if (pressed) fill = RGB(GetRValue(fill) * 85 / 100, GetGValue(fill) * 85 / 100, GetBValue(fill) * 85 / 100);
-            FillRound(g, 0.5f, 0.5f, (float)w - 1, (float)h - 1, (float)h / 2,
-                      Gp(fill, disabled ? 110 : 255));
-            if (!primary) {
+            float rad = (float)S(8);
+            FillRound(g, 0, 0, (float)w, (float)h, rad, Gp(fill, disabled ? 110 : 255));
+            if (!primary && !onCard) {
                 Gdiplus::GraphicsPath p;
-                RoundPath(p, 0.5f, 0.5f, (float)w - 1, (float)h - 1, (float)h / 2);
+                RoundPath(p, 0.5f, 0.5f, (float)w - 1, (float)h - 1, rad);
                 Gdiplus::Pen pen(Gp(C.border), 1.0f);
                 g.DrawPath(&pen, &p);
             }
-            DrawLabel(mem, text, lr, g_fontBold, primary ? RGB(255, 255, 255) : (disabled ? C.sub : C.text),
+            DrawLabel(mem, text, lr, onCard ? g_font : g_fontBold, primary ? RGB(255, 255, 255) : (disabled ? C.sub : C.text),
                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
@@ -815,19 +819,19 @@ void RunSetup() {
 
 // ---------------------------------------------------------------- UI logic
 void LayoutControls() {
-    int bw = S(120), bh = S(36), by = S(kH - 64);
+    int bw = S(116), bh = S(34), by = S(kH - 62);
     MoveWindow(g_btnNext, S(kW - 36) - bw, by, bw, bh, TRUE);
     MoveWindow(g_btnBack, S(kW - 36) - 2 * bw - S(10), by, bw, bh, TRUE);
     MoveWindow(g_btnDetails, S(kSide + 36), by, S(150), bh, TRUE);
     for (size_t i = 0; i < g_optionToggles.size(); i++) {
         RECT r = OptionRect((int)i);
-        MoveWindow(g_optionToggles[i], r.left + 1, r.top + 1, r.right - r.left - 2, r.bottom - r.top - 2, TRUE);
+        MoveWindow(g_optionToggles[i], r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
     }
     RECT r = ResetRect();
-    MoveWindow(g_toggleReset, r.left + 1, r.top + 1, r.right - r.left - 2, r.bottom - r.top - 2, TRUE);
+    MoveWindow(g_toggleReset, r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
     RECT ir = IconRowRect();
-    MoveWindow(g_btnIcons, ir.right - S(232), ir.top + S(13), S(104), S(32), TRUE);
-    MoveWindow(g_btnIconFolder, ir.right - S(120), ir.top + S(13), S(104), S(32), TRUE);
+    MoveWindow(g_btnIcons, ir.right - S(200), ir.top + S(14), S(88), S(30), TRUE);
+    MoveWindow(g_btnIconFolder, ir.right - S(104), ir.top + S(14), S(88), S(30), TRUE);
     MoveWindow(g_log_edit, S(kSide + 36), S(136), S(kW - kSide - 72), S(kH - 136 - 130), TRUE);
 }
 
