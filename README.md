@@ -23,8 +23,6 @@ Documents\MacOs-Dock\
     ├── macos-traffic-lights.wh.cpp Windhawk mod: macOS Traffic Lights
     ├── three-finger-drag.wh.cpp   Windhawk mod: Three Finger Drag
     ├── turbo-boost-tray-toggle.wh.cpp Windhawk mod: Turbo Boost Tray Toggle
-    ├── Dock-Settings.cmd          Starts the Dock Settings app
-    ├── Dock-Settings.ps1          Dock Settings app
     ├── Trash.cmd                  Creates the Trash shortcut for the dock
     └── Trash.ps1
 ```
@@ -50,8 +48,8 @@ The setup does everything else automatically:
 
 Compiling the custom mods takes a few minutes. Mods that are already installed
 keep their settings; run `Setup.cmd -ResetSettings` to apply the recommended
-settings again. After the setup, pin `Files\Trash.lnk` to the taskbar and use
-the Dock Settings app to assign icons.
+settings again. After the setup, pin `Files\Trash.lnk` to the taskbar and
+right-click the apps in the dock → **Change icon …** to assign icons.
 
 The manual steps below do the same by hand.
 
@@ -83,8 +81,8 @@ them into the `Icons` folder (All Icons directly in to the `Icons` folder not in
 
 The default app list expects file names like `finder.png`, `safari.png`,
 `app store.png`, `system settings.png`, `photos.png`, `calculator.png`,
-`textedit.png`, `terminal.png`. You can change them any time in the Dock
-Settings app.
+`textedit.png`, `terminal.png`. You can change them any time: right-click the
+app in the dock → **Change icon …**.
 
 ## 3. Install the mods from the Windhawk catalog
 
@@ -128,26 +126,26 @@ These mods are not in the catalog. Install each one like this:
 
 ## 5. Restart Explorer
 
-Open the **Dock Settings** app (next step) and click **Restart Explorer**, or
-sign out and back in. The taskbar height and icon sizes are fully applied only
-after this restart.
+Sign out and back in, or restart Explorer in Task Manager. The taskbar height
+and icon sizes are fully applied only after this restart.
 
-## 6. Dock Settings app
+## 6. Dock settings and icons
 
-Double-click `Files\Dock-Settings.cmd` and confirm the admin prompt (needed
-because Windhawk stores its settings in a protected part of the registry).
+Right-click any app in the dock. The menu has:
 
-- **Size:** one slider that scales the whole dock. 100% equals the values under
-  *Advanced*.
-- **Taskbar icons:** lists all apps currently on the taskbar. Click
-  **Choose icon …** to pick a PNG from the `Icons` folder, or **Original** to
-  remove a custom icon. Click **Rescan** after pinning new apps.
-- **Advanced:** every single value (dock height, radius, spacing, icon sizes,
-  indicator dot, colors, icon folder, app list).
-- **My defaults / Save current as default:** restore or save your preferred
-  setup.
+- **Show jump list:** the normal Windows menu of the app (recent files, pin,
+  close window).
+- **Change icon …:** pick a PNG for exactly this app. It starts in the `Icons`
+  folder.
+- **Use Windows icon:** removes the custom icon of this app.
+- **Dock settings …:** opens the settings window.
 
-All changes are applied immediately.
+The settings window looks like the one of the Top Menu Bar and has the pages
+*General* (position left/bottom/right, size, hidden elements), *Dock*,
+*Appearance* (light/dark, tint and edge colors), *Icons* and *Indicator*. The
+dock at the bottom and on the left/right keep separate settings; the window
+always edits the current position. All changes apply immediately, no admin
+prompt needed.
 
 ## 7. Trash in the dock
 
@@ -162,8 +160,9 @@ right of the Trash; pin the apps you use regularly to keep it at the end.
 
 ## Custom icons for other apps
 
-The easiest way is the Dock Settings app (**Choose icon …**). To do it by hand,
-add an entry under *Advanced → Apps and icons* with:
+The easiest way: right-click the app in the dock → **Change icon …**. To do it
+by hand, add an entry in Windhawk under *macOS Dock → Settings → Apps and icons*
+with:
 
 - **App IDs:** find them with `Get-StartApps` in PowerShell. Several IDs can be
   separated with commas.
@@ -172,12 +171,13 @@ add an entry under *Advanced → Apps and icons* with:
  
 ## Known issues
 
-- Missing icons on first start: many apps show their original Windows icon at first, because App IDs differ between PCs. Open the Dock Settings app, go to Taskbar icons and use Choose icon … for     each app (use Rescan if an app is missing from the list).
+- Missing icons on first start: every app shows its Windows icon at first. Right-click each app in the dock → **Change icon …**.
 - Minimize animation with the dock on the left or right: the *MacOS Minimize Animation* mod is made for a dock at the bottom, so minimizing and restoring windows looks glitchy when the dock is on the left or right.
 
   
 ## Changelog
 
+- **New (macOS Dock 2.0):** right-click any app in the dock for a menu with **Show jump list**, **Change icon …**, **Use Windows icon** and **Dock settings …**. The new settings window lives inside the mod (same style as the Top Menu Bar settings, no admin prompt) and replaces the old PowerShell Dock Settings app. Your old settings are taken over automatically. The separator is turned by the dock itself now.
 - **Changed (macOS Dock 1.12):** new installs start with the author's tuned settings, separately for bottom and left/right. No custom app icons are preset anymore, so every app keeps its Windows icon until you pick one with **Choose icon …** in the Dock Settings app.
 - **New (macOS Dock 1.9):** bottom and left/right keep separate settings in the Dock Settings app; changes only apply to the current position. On the left or right the size goes up to 100%.
 - **New:** the Dock Settings app turns the separator of the *Taskbar Icon Separators* mod by 90° when the dock is on the left or right (and back at the bottom).
@@ -195,10 +195,9 @@ add an entry under *Advanced → Apps and icons* with:
 
 | Problem | Fix |
 |---|---|
-| Dock is cut off at the top | Increase *Taskbar height* or lower *Size* in the Dock Settings app |
-| An icon does not change | The app uses a different App ID. Use **Choose icon …** in the Dock Settings app, it detects the correct ID |
+| Dock is cut off at the top | Lower *Overall size* in the dock settings (right-click an app → **Dock settings …**) |
+| An icon does not change | Right-click the app → **Change icon …**, this always uses the correct App ID |
 | Taskbar looks broken after a Windows update | Disable the mod in Windhawk and wait for an update, or recompile it |
-| Settings app says "Mod settings not found" | Install the **macOS Dock** mod first (step 4) |
 | Icon not showing up | Convert Icon from .PNG to .ICO |
 
 ## License
@@ -212,4 +211,4 @@ GPL-3.0, see [LICENSE](LICENSE).
   the TranslucentTB project.
 - **Resource Redirect**, **Custom Window Corner Radius** by m417z;
   **MacOS Minimize Animation** by Abdullah Masood (Windhawk catalog).
-- Top Menu Bar, macOS Traffic Lights, Dock Settings app: Okan.
+- Top Menu Bar, macOS Traffic Lights, dock settings window: Okan.

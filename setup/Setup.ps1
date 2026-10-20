@@ -469,7 +469,7 @@ if ($script:Failed.Count) {
 }
 Write-Host '  Next steps:'
 Write-Host '   - Pin Files\Trash.lnk to the taskbar and drag it to the far right.'
-Write-Host '   - Open Files\Dock-Settings.cmd and use "Choose icon ..." for apps that still show Windows icons.'
+Write-Host '   - Right-click an app in the dock -> "Change icon ..." for apps that still show Windows icons.'
 
 } catch {
     Write-Host ''

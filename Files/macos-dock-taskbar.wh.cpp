@@ -2,12 +2,12 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         1.12
+// @version         2.0
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lcomctl32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshcore -lversion
+// @compilerOptions -lcomctl32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshcore -lversion -lgdiplus -lcomdlg32 -ldwmapi -luxtheme -lshell32
 // @license         GPL-3.0
 // ==/WindhawkMod==
 
@@ -20,8 +20,13 @@
 /*
 # macOS Dock
 
-Turns the Windows 11 taskbar into a floating macOS-style dock. Everything can
-be adjusted in the **Settings** tab:
+Turns the Windows 11 taskbar into a floating macOS-style dock.
+
+**Right-click any app in the dock** for *Show jump list*, *Change icon …*,
+*Use Windows icon* and *Dock settings …*. The dock settings window keeps
+separate values for the dock at the bottom and on the left/right and applies
+every change immediately. Values changed there take priority over the
+**Settings** tab below, which holds the starting values:
 
 * **Scale:** one value that resizes everything at once
 * **Dock:** height, corner radius, padding, blur, tint, edge highlight
@@ -45,7 +50,7 @@ under **Icon folder**. By default this is
 `%USERPROFILE%\Documents\MacOs-Dock\Icons`.
 
 For each app, add an entry under **Apps and icons** with its App ID and the PNG
-file name (easiest with "Choose icon" in the Dock Settings app). You can find
+file name (easiest: right-click the app in the dock → "Change icon …"). You can find
 App IDs by running `Get-StartApps` in PowerShell. Several IDs can be listed for
 one app, separated by commas. Apps without an entry keep their Windows icon.
 
@@ -56,7 +61,7 @@ one app, separated by commas. Apps without an entry keep their Windows icon.
 * The taskbar height and the size of icons without a custom PNG are fully
   applied after restarting Explorer.
 * After moving the taskbar to another side, restart Explorer once so the dock
-  switches its layout (the Dock Settings app does this for you).
+  switches its layout (the dock settings window does this for you).
 * On the left or right the taskbar gets the same width as its height at the
   bottom, so the dock looks exactly the same and the size slider works the
   same way. Icons whose file name contains "separator" are turned by 90°.
@@ -857,6 +862,18 @@ HRESULT InjectWindhawkTAP() noexcept
 #include <vector>
 
 using namespace std::string_view_literals;
+
+// For the dock settings window.
+#include <algorithm>
+namespace Gdiplus {
+using std::max;
+using std::min;
+}  // namespace Gdiplus
+#include <commdlg.h>
+#include <dwmapi.h>
+#include <gdiplus.h>
+#include <shlobj.h>
+#include <uxtheme.h>
 
 #include <initguid.h>
 
@@ -9096,13 +9113,209 @@ std::optional<bool> IsOsFeatureEnabled(UINT32 featureId) {
 
 namespace macdock {
 
-std::wstring GetStr(const std::wstring& key) {
+// ---------------------------------------------------------------------------
+// Settings: the dock settings window stores its values in the mod storage,
+// separately for the dock at the bottom ("b.") and on the left/right ("s.").
+// Values that were never changed there come from the Windhawk mod settings.
+// ---------------------------------------------------------------------------
+
+std::atomic<int> g_cachedEdge{ABE_BOTTOM};
+
+bool IsVerticalEdge(UINT edge) {
+    return edge == ABE_LEFT || edge == ABE_RIGHT;
+}
+
+static const wchar_t* const kProfileIntKeys[] = {
+    L"scale",        L"autoTaskbarHeight", L"taskbarHeight", L"dockHeight",
+    L"cornerRadius", L"paddingX",          L"dockBottom",    L"blurAmount",
+    L"buttonWidth",  L"iconSize",          L"nativeIconSize", L"iconOffsetY",
+    L"dotSize",      L"dotOffset",         L"dotOffsetX",    L"hideStart",
+    L"hideTray",     L"hideHover",         L"clickThroughTaskbar"};
+static const wchar_t* const kProfileStrKeys[] = {
+    L"appearance",     L"tintColor",        L"edgeColor",
+    L"darkTintColor",  L"darkEdgeColor",    L"dotActiveColor",
+    L"dotInactiveColor", L"dotAttentionColor"};
+
+bool IsProfileIntKey(const std::wstring& key) {
+    for (auto k : kProfileIntKeys) {
+        if (key == k) return true;
+    }
+    return false;
+}
+
+bool IsProfileStrKey(const std::wstring& key) {
+    for (auto k : kProfileStrKeys) {
+        if (key == k) return true;
+    }
+    return false;
+}
+
+std::wstring ProfileName(bool side, const std::wstring& key) {
+    return (side ? L"s." : L"b.") + key;
+}
+
+// Starting values on the left/right that differ from the bottom ones.
+bool SideDefault(const std::wstring& key, int* value) {
+    static const struct {
+        const wchar_t* key;
+        int value;
+    } kSideDefaults[] = {{L"scale", 90}, {L"dotSize", 4}, {L"dotOffsetX", 3}};
+    for (auto& d : kSideDefaults) {
+        if (key == d.key) {
+            *value = d.value;
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr int kNoValue = std::numeric_limits<int>::min();
+
+int GetIntFor(bool side, const std::wstring& key) {
+    if (IsProfileIntKey(key)) {
+        int v = Wh_GetIntValue(ProfileName(side, key).c_str(), kNoValue);
+        if (v != kNoValue) return v;
+        if (side && SideDefault(key, &v)) return v;
+    }
+    return Wh_GetIntSetting(key.c_str());
+}
+
+std::wstring GetStrFor(bool side, const std::wstring& key) {
+    if (IsProfileStrKey(key) || key == L"iconFolder") {
+        // The icon folder is the same for both positions.
+        std::wstring name =
+            key == L"iconFolder" ? L"g.iconFolder" : ProfileName(side, key);
+        WCHAR buf[1024];
+        size_t len = Wh_GetStringValue(name.c_str(), buf, ARRAYSIZE(buf));
+        if (len > 0) return std::wstring(buf);
+    }
     string_setting_unique_ptr value(Wh_GetStringSetting(key.c_str()));
     return value.get() ? std::wstring(value.get()) : std::wstring();
 }
 
+void SetIntFor(bool side, const std::wstring& key, int value) {
+    Wh_SetIntValue(ProfileName(side, key).c_str(), value);
+}
+
+void SetStrFor(bool side, const std::wstring& key, const std::wstring& value) {
+    std::wstring name =
+        key == L"iconFolder" ? L"g.iconFolder" : ProfileName(side, key);
+    Wh_SetStringValue(name.c_str(), value.c_str());
+}
+
+// Forgets everything the settings window changed for one position.
+void ResetProfile(bool side) {
+    for (auto k : kProfileIntKeys) Wh_DeleteValue(ProfileName(side, k).c_str());
+    for (auto k : kProfileStrKeys) Wh_DeleteValue(ProfileName(side, k).c_str());
+}
+
+bool CurrentIsSide() {
+    return IsVerticalEdge(g_cachedEdge);
+}
+
+std::wstring GetStr(const std::wstring& key) {
+    return GetStrFor(CurrentIsSide(), key);
+}
+
 int GetInt(const std::wstring& key) {
-    return Wh_GetIntSetting(key.c_str());
+    return GetIntFor(CurrentIsSide(), key);
+}
+
+// Custom icons chosen with the right-click menu: one line per App ID,
+// "<App ID>\t<PNG file>". The file "-" means "keep the Windows icon".
+std::vector<std::pair<std::wstring, std::wstring>> GetIconMap() {
+    std::vector<std::pair<std::wstring, std::wstring>> result;
+    std::wstring all;
+    {
+        std::vector<WCHAR> buf(64 * 1024);
+        size_t len = Wh_GetStringValue(L"g.icons", buf.data(), buf.size());
+        all.assign(buf.data(), len);
+    }
+    size_t start = 0;
+    while (start < all.size()) {
+        size_t end = all.find(L'\n', start);
+        if (end == std::wstring::npos) end = all.size();
+        std::wstring line = all.substr(start, end - start);
+        size_t tab = line.find(L'\t');
+        if (tab != std::wstring::npos && tab > 0) {
+            result.push_back({line.substr(0, tab), line.substr(tab + 1)});
+        }
+        start = end + 1;
+    }
+    return result;
+}
+
+void SetIconFor(const std::wstring& appId, const std::wstring& file) {
+    auto map = GetIconMap();
+    std::erase_if(map, [&](auto& e) { return _wcsicmp(e.first.c_str(), appId.c_str()) == 0; });
+    if (!file.empty()) map.push_back({appId, file});
+    std::wstring all;
+    for (auto& e : map) all += e.first + L"\t" + e.second + L"\n";
+    Wh_SetStringValue(L"g.icons", all.c_str());
+}
+
+// Takes over the profiles of the old PowerShell settings app once
+// (%APPDATA%\MacDockEinstellungen\profil-unten.json / profil-seite.json).
+void ImportOldProfile(const wchar_t* fileName, bool side) {
+    WCHAR path[MAX_PATH * 2];
+    std::wstring rel = std::wstring(L"%APPDATA%\\MacDockEinstellungen\\") + fileName;
+    if (!ExpandEnvironmentStringsW(rel.c_str(), path, ARRAYSIZE(path))) return;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    std::string bytes;
+    char chunk[4096];
+    DWORD got = 0;
+    while (ReadFile(f, chunk, sizeof(chunk), &got, nullptr) && got) {
+        bytes.append(chunk, got);
+        if (bytes.size() > 256 * 1024) break;
+    }
+    CloseHandle(f);
+    int n = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(),
+                                nullptr, 0);
+    std::wstring text(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), text.data(),
+                        n);
+    // Flat JSON object: "key":  value  (number or "string").
+    size_t pos = 0;
+    while ((pos = text.find(L'"', pos)) != std::wstring::npos) {
+        size_t keyEnd = text.find(L'"', pos + 1);
+        if (keyEnd == std::wstring::npos) break;
+        std::wstring key = text.substr(pos + 1, keyEnd - pos - 1);
+        size_t colon = text.find_first_not_of(L" \t", keyEnd + 1);
+        if (colon == std::wstring::npos || text[colon] != L':') {
+            pos = keyEnd + 1;
+            continue;
+        }
+        size_t v = text.find_first_not_of(L" \t\r\n", colon + 1);
+        if (v == std::wstring::npos) break;
+        if (text[v] == L'"') {
+            size_t vEnd = text.find(L'"', v + 1);
+            if (vEnd == std::wstring::npos) break;
+            std::wstring value = text.substr(v + 1, vEnd - v - 1);
+            if (IsProfileStrKey(key)) SetStrFor(side, key, value);
+            pos = vEnd + 1;
+        } else {
+            size_t vEnd = text.find_first_of(L",}\r\n", v);
+            std::wstring value = text.substr(v, vEnd - v);
+            if (IsProfileIntKey(key)) SetIntFor(side, key, _wtoi(value.c_str()));
+            pos = vEnd == std::wstring::npos ? text.size() : vEnd;
+        }
+    }
+}
+
+void MigrateOldSettingsApp() {
+    if (Wh_GetIntValue(L"g.migrated", 0)) return;
+    ImportOldProfile(L"profil-unten.json", false);
+    ImportOldProfile(L"profil-seite.json", true);
+    Wh_SetIntValue(L"g.migrated", 1);
+}
+
+std::wstring GetIconFor(const std::wstring& appId) {
+    for (auto& e : GetIconMap()) {
+        if (_wcsicmp(e.first.c_str(), appId.c_str()) == 0) return e.second;
+    }
+    return L"";
 }
 
 // True if the Windows taskbar/system uses dark mode.
@@ -9146,12 +9359,6 @@ UINT GetTaskbarEdge(int* widthDip = nullptr) {
 // Thickness of the taskbar at the bottom (its height), in scaled pixels.
 int GetTaskbarThickness();
 
-std::atomic<int> g_cachedEdge{ABE_BOTTOM};
-
-bool IsVerticalEdge(UINT edge) {
-    return edge == ABE_LEFT || edge == ABE_RIGHT;
-}
-
 bool IsAppearanceAuto() {
     std::wstring appearance = GetStr(L"appearance");
     return appearance != L"dark" && appearance != L"light";
@@ -9161,7 +9368,7 @@ bool IsAppearanceAuto() {
 constexpr int kVerticalMaxScale = 100;
 
 int GetScale() {
-    int scale = Wh_GetIntSetting(L"scale");
+    int scale = GetInt(L"scale");
     if (scale <= 0) scale = 100;
     if (IsVerticalEdge(g_cachedEdge) && scale > kVerticalMaxScale) {
         scale = kVerticalMaxScale;
@@ -9171,14 +9378,14 @@ int GetScale() {
 
 // Reads a pixel setting and applies the global scale.
 int GetPx(const std::wstring& key) {
-    return MulDiv(Wh_GetIntSetting(key.c_str()), GetScale(), 100);
+    return MulDiv(GetInt(key), GetScale(), 100);
 }
 
 int GetTaskbarThickness() {
-    int h = Wh_GetIntSetting(L"taskbarHeight");
-    if (Wh_GetIntSetting(L"autoTaskbarHeight")) {
+    int h = GetInt(L"taskbarHeight");
+    if (GetInt(L"autoTaskbarHeight")) {
         // Same rule as the bottom taskbar: dock + distance + 2 px border.
-        h = Wh_GetIntSetting(L"dockHeight") + Wh_GetIntSetting(L"dockBottom") + 2;
+        h = GetInt(L"dockHeight") + GetInt(L"dockBottom") + 2;
     }
     if (h <= 0) h = 48;
     return MulDiv(h, GetScale(), 100);
@@ -9208,7 +9415,10 @@ std::wstring FileUrl(std::wstring folder, const std::wstring& file) {
     while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) {
         folder.pop_back();
     }
-    std::wstring path = folder + L"/" + file;
+    // The right-click menu can store a full path to an image elsewhere.
+    bool absolute = (file.size() > 2 && file[1] == L':') ||
+                    file.rfind(L"\\\\", 0) == 0;
+    std::wstring path = absolute ? file : folder + L"/" + file;
     for (auto& c : path) {
         if (c == L'\\') c = L'/';
     }
@@ -9445,6 +9655,14 @@ void ApplyDockSettings() {
         : rightEdge ? Fmt(L"Margin=%d,-1,%d,-1", -2 - iconOffsetY, -2 + iconOffsetY)
                     : Fmt(L"Margin=%d,-1,%d,-1", -2 + iconOffsetY, -2 - iconOffsetY);
 
+    // Apps from the Windhawk settings, then the icons chosen with the
+    // right-click menu, which win for their App ID.
+    struct AppIcon {
+        std::wstring name;
+        std::vector<std::wstring> idList;
+        std::wstring file;
+    };
+    std::vector<AppIcon> appIcons;
     for (int i = 0; i < 200; i++) {
         std::wstring name = GetStr(Fmt(L"apps[%d].name", i));
         std::wstring ids = GetStr(Fmt(L"apps[%d].ids", i));
@@ -9452,8 +9670,23 @@ void ApplyDockSettings() {
         if (name.empty() && ids.empty() && file.empty()) {
             break;
         }
+        appIcons.push_back({name, SplitIds(ids), file});
+    }
+    for (auto& [appId, file] : GetIconMap()) {
+        for (auto& a : appIcons) {
+            std::erase_if(a.idList, [&](const std::wstring& id) {
+                return _wcsicmp(id.c_str(), appId.c_str()) == 0;
+            });
+        }
+        if (file != L"-") {
+            appIcons.push_back({L"", {appId}, file});
+        }
+    }
 
-        auto idList = SplitIds(ids);
+    for (const auto& appIcon : appIcons) {
+        const std::wstring& name = appIcon.name;
+        const std::wstring& file = appIcon.file;
+        const auto& idList = appIcon.idList;
         if (idList.empty() || file.empty()) {
             continue;
         }
@@ -9981,6 +10214,8 @@ bool HookInitializeXamlDiagnosticsExIfNeeded() {
 #undef GetCurrentTime
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.UI.Xaml.Automation.h>
+#include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <atomic>
@@ -9992,6 +10227,13 @@ bool HookInitializeXamlDiagnosticsExIfNeeded() {
 #include <string>
 #include <string_view>
 #include <unordered_map>
+
+void ReloadDock(bool settingsChanged);
+
+// Dock settings window and icon picker (implemented at the end of the file).
+void DockUiShowSettings();
+void DockUiChangeIcon(const std::wstring& appId, const std::wstring& appName);
+void DockUiStop();
 
 namespace taskbarheight {
 
@@ -11730,6 +11972,245 @@ double GetSeparatorModWidth() {
     return value;
 }
 
+// ---------------------------------------------------------------------------
+// Right-click menu on the dock icons: "Show jump list", "Change icon…",
+// "Use Windows icon" and "Dock settings…". Windows routes a right-click on a
+// taskbar button through one of these functions, depending on the build.
+// ---------------------------------------------------------------------------
+using TaskListButton_OnContextRequested_t = void(WINAPI*)(
+    void* pThis,
+    UIElement const& sender,
+    Input::ContextRequestedEventArgs const& args);
+TaskListButton_OnContextRequested_t TaskListButton_OnContextRequested_Original;
+
+using TaskListButtonHandlers_HandleContextRequested_t = void(WINAPI*)(
+    UIElement const& sender,
+    Input::ContextRequestedEventArgs const& args);
+TaskListButtonHandlers_HandleContextRequested_t
+    TaskListButtonHandlers_HandleContextRequested_Original;
+
+using TaskbarResources_OnTaskListButtonContextRequested_t = void(WINAPI*)(
+    void* pThis,
+    UIElement const& sender,
+    Input::ContextRequestedEventArgs const& args);
+TaskbarResources_OnTaskListButtonContextRequested_t
+    TaskbarResources_OnTaskListButtonContextRequested_Original;
+
+std::atomic<bool> g_dockMenuOpen;
+bool g_dockMenuPassThrough;  // taskbar thread only
+winrt::weak_ref<Controls::MenuFlyout> g_dockMenu;
+
+struct DockMenuRequest {
+    int route;
+    void* pThis;
+    UIElement sender{nullptr};
+    Input::ContextRequestedEventArgs args{nullptr};
+};
+
+void CallOriginalContextRoute(const DockMenuRequest& r) {
+    g_dockMenuPassThrough = true;
+    try {
+        r.args.Handled(false);
+        switch (r.route) {
+            case 0:
+                TaskListButton_OnContextRequested_Original(r.pThis, r.sender,
+                                                           r.args);
+                break;
+            case 1:
+                TaskListButtonHandlers_HandleContextRequested_Original(r.sender,
+                                                                       r.args);
+                break;
+            case 2:
+                TaskbarResources_OnTaskListButtonContextRequested_Original(
+                    r.pThis, r.sender, r.args);
+                break;
+        }
+    } catch (...) {
+        HRESULT hr = winrt::to_hresult();
+        Wh_Log(L"Error %08X", hr);
+    }
+    g_dockMenuPassThrough = false;
+}
+
+bool IsSeparatorButton(FrameworkElement const& element) {
+    std::wstring name(
+        Automation::AutomationProperties::GetName(element).c_str());
+    return name.find(L".8F31A7D2.") != std::wstring::npos;
+}
+
+std::wstring GetButtonAppId(FrameworkElement const& element) {
+    std::wstring id(
+        Automation::AutomationProperties::GetAutomationId(element).c_str());
+    static constexpr std::wstring_view kPrefix = L"Appid: ";
+    if (id.rfind(kPrefix, 0) != 0) return L"";
+    return id.substr(kPrefix.size());
+}
+
+// True if the app has a dock icon, from the right-click menu or the Windhawk
+// app list.
+bool HasCustomIcon(const std::wstring& appId) {
+    std::wstring file = macdock::GetIconFor(appId);
+    if (!file.empty()) return file != L"-";
+    for (int i = 0; i < 200; i++) {
+        std::wstring ids = macdock::GetStr(macdock::Fmt(L"apps[%d].ids", i));
+        std::wstring f = macdock::GetStr(macdock::Fmt(L"apps[%d].file", i));
+        std::wstring n = macdock::GetStr(macdock::Fmt(L"apps[%d].name", i));
+        if (ids.empty() && f.empty() && n.empty()) break;
+        if (f.empty()) continue;
+        for (auto& id : macdock::SplitIds(ids)) {
+            if (_wcsicmp(id.c_str(), appId.c_str()) == 0) return true;
+        }
+    }
+    return false;
+}
+
+bool UseGermanUi() {
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_GERMAN;
+}
+
+Controls::MenuFlyoutItem MakeDockMenuItem(const wchar_t* text,
+                                          const wchar_t* glyph) {
+    Controls::MenuFlyoutItem item;
+    item.Text(text);
+    Controls::FontIcon icon;
+    icon.FontFamily(Media::FontFamily(L"Segoe Fluent Icons, Segoe MDL2 Assets"));
+    icon.Glyph(glyph);
+    icon.FontSize(16);
+    item.Icon(icon);
+    return item;
+}
+
+bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
+    if (g_unloading || g_dockMenuPassThrough || !element) {
+        return false;
+    }
+    if (winrt::get_class_name(element) != L"Taskbar.TaskListButton" ||
+        IsSeparatorButton(element)) {
+        return false;
+    }
+    // Several routes can report the same right-click; only the first one
+    // opens the menu, the others are just swallowed.
+    if (g_dockMenuOpen.exchange(true)) {
+        return true;
+    }
+
+    try {
+        bool de = UseGermanUi();
+        std::wstring appId = GetButtonAppId(element);
+        std::wstring appName(
+            Automation::AutomationProperties::GetName(element).c_str());
+
+        Controls::MenuFlyout menu;
+        UINT edge = macdock::GetTaskbarEdge();
+        menu.Placement(edge == ABE_LEFT    ? Controls::Primitives::FlyoutPlacementMode::Right
+                       : edge == ABE_RIGHT ? Controls::Primitives::FlyoutPlacementMode::Left
+                                           : Controls::Primitives::FlyoutPlacementMode::Top);
+
+        auto jump = MakeDockMenuItem(de ? L"Sprungliste anzeigen" : L"Show jump list",
+                                     L"\uE8FD");
+        jump.Click([request](auto&&, auto&&) {
+            g_dockMenuOpen = false;
+            CallOriginalContextRoute(request);
+        });
+        menu.Items().Append(jump);
+
+        if (!appId.empty()) {
+            menu.Items().Append(Controls::MenuFlyoutSeparator());
+            auto change = MakeDockMenuItem(de ? L"Icon ändern …" : L"Change icon …",
+                                           L"\uE8B9");
+            change.Click([appId, appName](auto&&, auto&&) {
+                g_dockMenuOpen = false;
+                DockUiChangeIcon(appId, appName);
+            });
+            menu.Items().Append(change);
+            if (HasCustomIcon(appId)) {
+                auto original = MakeDockMenuItem(
+                    de ? L"Windows-Icon verwenden" : L"Use Windows icon", L"\uE7A7");
+                original.Click([appId](auto&&, auto&&) {
+                    g_dockMenuOpen = false;
+                    macdock::SetIconFor(appId, L"-");
+                    HANDLE t = CreateThread(
+                        nullptr, 0,
+                        [](LPVOID) -> DWORD {
+                            ReloadDock(false);
+                            return 0;
+                        },
+                        nullptr, 0, nullptr);
+                    if (t) CloseHandle(t);
+                });
+                menu.Items().Append(original);
+            }
+        }
+
+        menu.Items().Append(Controls::MenuFlyoutSeparator());
+        auto settings = MakeDockMenuItem(de ? L"Dock-Einstellungen …" : L"Dock settings …",
+                                         L"\uE713");
+        settings.Click([](auto&&, auto&&) {
+            g_dockMenuOpen = false;
+            DockUiShowSettings();
+        });
+        menu.Items().Append(settings);
+
+        menu.Closed([](auto&&, auto&&) { g_dockMenuOpen = false; });
+        g_dockMenu = winrt::make_weak(menu);
+        menu.ShowAt(element);
+        request.args.Handled(true);
+    } catch (...) {
+        g_dockMenuOpen = false;
+        HRESULT hr = winrt::to_hresult();
+        Wh_Log(L"Error %08X", hr);
+        return false;
+    }
+    return true;
+}
+
+void WINAPI TaskListButton_OnContextRequested_Hook(
+    void* pThis,
+    UIElement const& sender,
+    Input::ContextRequestedEventArgs const& args) {
+    FrameworkElement element = nullptr;
+    ((IUnknown*)pThis + 3)
+        ->QueryInterface(winrt::guid_of<FrameworkElement>(),
+                         winrt::put_abi(element));
+    if (!element) element = sender.try_as<FrameworkElement>();
+    if (TryShowDockMenu(element, {0, pThis, sender, args})) return;
+    TaskListButton_OnContextRequested_Original(pThis, sender, args);
+}
+
+void WINAPI TaskListButtonHandlers_HandleContextRequested_Hook(
+    UIElement const& sender,
+    Input::ContextRequestedEventArgs const& args) {
+    if (TryShowDockMenu(sender.try_as<FrameworkElement>(),
+                        {1, nullptr, sender, args})) {
+        return;
+    }
+    TaskListButtonHandlers_HandleContextRequested_Original(sender, args);
+}
+
+void WINAPI TaskbarResources_OnTaskListButtonContextRequested_Hook(
+    void* pThis,
+    UIElement const& sender,
+    Input::ContextRequestedEventArgs const& args) {
+    if (TryShowDockMenu(sender.try_as<FrameworkElement>(),
+                        {2, pThis, sender, args})) {
+        return;
+    }
+    TaskbarResources_OnTaskListButtonContextRequested_Original(pThis, sender,
+                                                               args);
+}
+
+// Rotation the separator mod applies to its own icon (its setting).
+int GetSeparatorModRotation() {
+    DWORD value = 0, size = sizeof(value);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Windhawk\\Engine\\Mods\\taskbar-icon-separators\\Settings",
+                     L"iconRotation", RRF_RT_REG_DWORD, nullptr, &value,
+                     &size) != ERROR_SUCCESS) {
+        return 0;
+    }
+    return (int)value;
+}
+
 void UpdateVerticalSeparator(void* pThis) {
     FrameworkElement element = nullptr;
     ((IUnknown*)pThis + 3)
@@ -11758,6 +12239,25 @@ void UpdateVerticalSeparator(void* pThis) {
         if (iconPanel && iconPanel.MaxHeight() == width) {
             iconPanel.ClearValue(FrameworkElement::MaxHeightProperty());
             iconPanel.ClearValue(FrameworkElement::VerticalAlignmentProperty());
+        }
+    }
+
+    // The line has to lie flat on the left/right and stand upright at the
+    // bottom. Turn it by 90° where the separator mod's own rotation doesn't.
+    if (FrameworkElement icon = iconPanel ? FindChildByName(iconPanel, L"Icon")
+                                           : FrameworkElement(nullptr)) {
+        bool vertical = !g_unloading && IsVerticalTaskbar();
+        int wanted = vertical ? 90 : 0;
+        bool turn = !g_unloading &&
+                    ((wanted - GetSeparatorModRotation()) % 180 + 180) % 180 != 0;
+        if (turn) {
+            Media::RotateTransform rotate;
+            rotate.Angle(90);
+            icon.RenderTransformOrigin({0.5f, 0.5f});
+            icon.RenderTransform(rotate);
+        } else if (auto t = icon.RenderTransform();
+                   t && t.try_as<Media::RotateTransform>()) {
+            icon.ClearValue(UIElement::RenderTransformProperty());
         }
     }
 }
@@ -12475,16 +12975,16 @@ void LoadSettings() {
     int scale = macdock::GetScale();
     auto px = [scale](int v) { return MulDiv(v, scale, 100); };
 
-    int taskbarHeight = Wh_GetIntSetting(L"taskbarHeight");
-    if (Wh_GetIntSetting(L"autoTaskbarHeight")) {
+    int taskbarHeight = macdock::GetInt(L"taskbarHeight");
+    if (macdock::GetInt(L"autoTaskbarHeight")) {
         // Dock height + distance to the bottom edge + 2 px for the border.
-        taskbarHeight = Wh_GetIntSetting(L"dockHeight") +
-                        Wh_GetIntSetting(L"dockBottom") + 2;
+        taskbarHeight = macdock::GetInt(L"dockHeight") +
+                        macdock::GetInt(L"dockBottom") + 2;
     }
     g_settings.taskbarHeight = px(taskbarHeight > 0 ? taskbarHeight : 48);
-    int nativeIconSize = Wh_GetIntSetting(L"nativeIconSize");
+    int nativeIconSize = macdock::GetInt(L"nativeIconSize");
     g_settings.iconSize = px(nativeIconSize > 0 ? nativeIconSize : 24);
-    int buttonWidth = Wh_GetIntSetting(L"buttonWidth");
+    int buttonWidth = macdock::GetInt(L"buttonWidth");
     g_settings.taskbarButtonWidth = px(buttonWidth > 0 ? buttonWidth : 44);
 
     g_settings.iconSizeSmall = 16;
@@ -12879,6 +13379,24 @@ bool HookTaskbarViewDllSymbols(HMODULE module,
                 &TaskListButton_TaskbarFrameSize_Original,
                 TaskListButton_TaskbarFrameSize_Hook,
                 true,  // Only in builds with the native vertical taskbar.
+            },
+            {
+                {LR"(private: void __cdecl winrt::Taskbar::implementation::TaskListButton::OnContextRequested(struct winrt::Windows::UI::Xaml::UIElement const &,struct winrt::Windows::UI::Xaml::Input::ContextRequestedEventArgs const &))"},
+                &TaskListButton_OnContextRequested_Original,
+                TaskListButton_OnContextRequested_Hook,
+                true,
+            },
+            {
+                {LR"(public: static void __cdecl winrt::Taskbar::implementation::TaskListButtonHandlers::HandleContextRequested(struct winrt::Windows::UI::Xaml::UIElement const &,struct winrt::Windows::UI::Xaml::Input::ContextRequestedEventArgs const &))"},
+                &TaskListButtonHandlers_HandleContextRequested_Original,
+                TaskListButtonHandlers_HandleContextRequested_Hook,
+                true,
+            },
+            {
+                {LR"(public: void __cdecl winrt::Taskbar::implementation::TaskbarResources::OnTaskListButtonContextRequested(struct winrt::Windows::UI::Xaml::UIElement const &,struct winrt::Windows::UI::Xaml::Input::ContextRequestedEventArgs const &))"},
+                &TaskbarResources_OnTaskListButtonContextRequested_Original,
+                TaskbarResources_OnTaskListButtonContextRequested_Hook,
+                true,
             },
             {
                 {LR"(public: void __cdecl winrt::Microsoft::Windows::Taskbar::implementation::TaskbarComponentHost::IconHeight(double))"},
@@ -13699,7 +14217,8 @@ void StopStatsTimer() {
 }
 
 void LoadSettings() {
-    g_settings.clickThroughTaskbar = Wh_GetIntSetting(L"clickThroughTaskbar");
+    macdock::g_cachedEdge = macdock::GetTaskbarEdge();
+    g_settings.clickThroughTaskbar = macdock::GetInt(L"clickThroughTaskbar");
 
     PCWSTR xamlDiagnosticsHandling =
         Wh_GetStringSetting(L"xamlDiagnosticsHandling");
@@ -13786,6 +14305,8 @@ void StopThemeWatch() {
 
 BOOL Wh_ModInit() {
     Wh_Log(L">");
+
+    macdock::MigrateOldSettingsApp();
 
     LoadSettings();
 
@@ -13881,6 +14402,8 @@ void Wh_ModBeforeUninit() {
 void Wh_ModUninit() {
     Wh_Log(L">");
 
+    DockUiStop();
+
     StopThemeWatch();
 
     taskbarheight::Uninit();
@@ -13969,4 +14492,1111 @@ void ReloadDock(bool settingsChanged) {
     if (initialize) {
         InitializeSettingsAndTap();
     }
+}
+
+// ===========================================================================
+// Dock settings window (opened from the right-click menu of a dock icon)
+// ===========================================================================
+// Runs on its own thread, so the taskbar never waits for it. All values are
+// stored per position (bottom or left/right) in the mod storage, see
+// macdock::GetIntFor / SetIntFor, and applied live.
+
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+namespace dockui {
+
+constexpr UINT WM_DOCKUI_SHOW = WM_APP + 1;
+constexpr UINT WM_DOCKUI_ICON = WM_APP + 2;
+constexpr UINT WM_DOCKUI_REBUILD = WM_APP + 3;
+constexpr UINT_PTR kApplyTimer = 1;
+
+const wchar_t kWndClass[] = L"WhMacDockSettings_" WH_MOD_ID;
+
+HANDLE g_thread;
+DWORD g_threadId;
+HANDLE g_threadReady;
+std::mutex g_threadMutex;
+HWND g_wnd;
+bool g_de;
+bool g_side;  // which position the window edits
+ULONG_PTR g_gdipToken;
+
+const wchar_t* T(const wchar_t* de, const wchar_t* en) {
+    return g_de ? de : en;
+}
+
+// ---------- values ----------
+int Int(const wchar_t* key) {
+    return macdock::GetIntFor(g_side, key);
+}
+
+std::wstring Str(const wchar_t* key) {
+    return macdock::GetStrFor(g_side, key);
+}
+
+void Apply(HWND w) {
+    // Collect quick changes (slider drags) into one reload.
+    SetTimer(w, kApplyTimer, 250, nullptr);
+}
+
+void ReloadNow() {
+    HANDLE t = CreateThread(
+        nullptr, 0,
+        [](LPVOID) -> DWORD {
+            ReloadDock(true);
+            return 0;
+        },
+        nullptr, 0, nullptr);
+    if (t) CloseHandle(t);
+}
+
+void SetInt(HWND w, const wchar_t* key, int v) {
+    macdock::SetIntFor(g_side, key, v);
+    Apply(w);
+}
+
+void SetStr(HWND w, const wchar_t* key, const std::wstring& v) {
+    macdock::SetStrFor(g_side, key, v);
+    Apply(w);
+}
+
+// "#AARRGGBB" or "#RRGGBB"
+bool ParseColor(const std::wstring& s, BYTE* a, COLORREF* rgb) {
+    if (s.size() != 7 && s.size() != 9) return false;
+    if (s[0] != L'#') return false;
+    unsigned long v = wcstoul(s.c_str() + 1, nullptr, 16);
+    if (s.size() == 9) {
+        *a = (BYTE)(v >> 24);
+    } else {
+        *a = 255;
+    }
+    *rgb = RGB((v >> 16) & 255, (v >> 8) & 255, v & 255);
+    return true;
+}
+
+std::wstring FormatColor(BYTE a, COLORREF rgb) {
+    wchar_t b[16];
+    swprintf(b, 16, L"#%02X%02X%02X%02X", a, GetRValue(rgb), GetGValue(rgb),
+             GetBValue(rgb));
+    return b;
+}
+
+// ---------- layout ----------
+enum RowType {
+    R_SECTION,
+    R_SLIDER,
+    R_TOGGLE,
+    R_COMBO,
+    R_COLOR,
+    R_ALPHA,
+    R_BUTTON,
+    R_NOTE,
+    R_FOLDER
+};
+
+enum {
+    ID_FIRST = 1000,
+    ID_POSITION = 900,
+    ID_APPEARANCE,
+    ID_RESET,
+    ID_RESETICONS,
+    ID_FOLDER,
+    ID_FOLDERBROWSE
+};
+
+struct Row {
+    int page;
+    RowType type;
+    const wchar_t* de;
+    const wchar_t* en;
+    const wchar_t* key;  // setting, or the color of an R_ALPHA row
+    int min, max;
+    const wchar_t* unit;
+    int id;
+    int h;
+    RECT rc;
+};
+
+std::vector<Row> g_rows;
+struct Ctl {
+    HWND hwnd;
+    int page;
+};
+std::vector<Ctl> g_ctls;
+int g_page = 0, g_hoverNav = -1;
+bool g_navTracking, g_syncing;
+int g_clientW, g_clientH;
+HFONT g_font, g_fontBold, g_fontTitle, g_fontSmall, g_fontIcon;
+
+struct NavPage {
+    const wchar_t* glyph;
+    const wchar_t* de;
+    const wchar_t* en;
+};
+const NavPage kPages[] = {
+    {L"", L"Allgemein", L"General"},  {L"", L"Dock", L"Dock"},
+    {L"", L"Aussehen", L"Appearance"}, {L"", L"Icons", L"Icons"},
+    {L"", L"Punkt", L"Indicator"},    {L"", L"Info", L"About"}};
+constexpr int kPageCount = ARRAYSIZE(kPages);
+
+void AddRow(int page, RowType t, const wchar_t* de, const wchar_t* en,
+            const wchar_t* key = nullptr, int mn = 0, int mx = 0,
+            const wchar_t* unit = L"", int id = 0) {
+    int h = t == R_SECTION ? 36 : t == R_NOTE ? 62 : 50;
+    if (!id) id = ID_FIRST + (int)g_rows.size();
+    g_rows.push_back({page, t, de, en, key, mn, mx, unit, id, h, {}});
+}
+
+void DefineRows() {
+    g_rows.clear();
+    // General
+    AddRow(0, R_SECTION, L"Position", L"Position");
+    AddRow(0, R_COMBO, L"Dock am Bildschirmrand", L"Dock on screen edge", nullptr, 0, 0,
+           L"", ID_POSITION);
+    AddRow(0, R_NOTE,
+           L"Unten und links/rechts haben eigene Einstellungen. Alles in diesem Fenster gilt "
+           L"nur für die aktuelle Position. Beim Wechsel startet der Explorer neu.",
+           L"Bottom and left/right keep separate settings. Everything in this window applies "
+           L"to the current position only. Explorer restarts when you switch.");
+    AddRow(0, R_SECTION, L"Größe", L"Size");
+    AddRow(0, R_SLIDER, L"Gesamtgröße", L"Overall size", L"scale", 50, 200, L"%");
+    AddRow(0, R_SECTION, L"Elemente", L"Elements");
+    AddRow(0, R_TOGGLE, L"Start-Button ausblenden", L"Hide Start button", L"hideStart");
+    AddRow(0, R_TOGGLE, L"Infobereich und Uhr ausblenden", L"Hide system tray and clock",
+           L"hideTray");
+    AddRow(0, R_TOGGLE, L"Hover-Hintergrund ausblenden", L"Hide hover background",
+           L"hideHover");
+    AddRow(0, R_TOGGLE, L"Klicks neben dem Dock durchlassen",
+           L"Click through empty taskbar areas", L"clickThroughTaskbar");
+    AddRow(0, R_SECTION, L"Zurücksetzen", L"Reset");
+    AddRow(0, R_BUTTON, L"Alle Werte dieser Position auf Standard",
+           L"Reset all values of this position", nullptr, 0, 0, L"", ID_RESET);
+    // Dock
+    AddRow(1, R_SECTION, L"Dock", L"Dock");
+    AddRow(1, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
+    AddRow(1, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
+    AddRow(1, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
+           30, L"px");
+    AddRow(1, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
+           L"dockBottom", 0, 30, L"px");
+    AddRow(1, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
+    AddRow(1, R_SECTION, L"Taskleiste", L"Taskbar");
+    AddRow(1, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
+           L"autoTaskbarHeight");
+    AddRow(1, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
+           L"Taskbar height (when not fitted)", L"taskbarHeight", 40, 100, L"px");
+    // Appearance
+    AddRow(2, R_SECTION, L"Modus", L"Mode");
+    AddRow(2, R_COMBO, L"Hell oder dunkel", L"Light or dark", nullptr, 0, 0, L"",
+           ID_APPEARANCE);
+    AddRow(2, R_SECTION, L"Hell", L"Light");
+    AddRow(2, R_COLOR, L"Tönung", L"Tint", L"tintColor");
+    AddRow(2, R_ALPHA, L"Deckkraft der Tönung", L"Tint opacity", L"tintColor", 0, 100, L"%");
+    AddRow(2, R_COLOR, L"Kante oben", L"Top edge", L"edgeColor");
+    AddRow(2, R_SECTION, L"Dunkel", L"Dark");
+    AddRow(2, R_COLOR, L"Tönung", L"Tint", L"darkTintColor");
+    AddRow(2, R_ALPHA, L"Deckkraft der Tönung", L"Tint opacity", L"darkTintColor", 0, 100,
+           L"%");
+    AddRow(2, R_COLOR, L"Kante oben", L"Top edge", L"darkEdgeColor");
+    // Icons
+    AddRow(3, R_SECTION, L"Größen", L"Sizes");
+    AddRow(3, R_SLIDER, L"Platz pro Icon", L"Space per icon", L"buttonWidth", 30, 80, L"px");
+    AddRow(3, R_SLIDER, L"Eigene Icons", L"Custom icons", L"iconSize", 20, 70, L"px");
+    AddRow(3, R_SLIDER, L"Windows-Icons (0 = Standard)", L"Windows icons (0 = default)",
+           L"nativeIconSize", 0, 64, L"px");
+    AddRow(3, R_SLIDER, L"Position (+ = näher am Rand)", L"Position (+ = closer to edge)",
+           L"iconOffsetY", -10, 10, L"px");
+    AddRow(3, R_SECTION, L"Eigene Icons", L"Custom icons");
+    AddRow(3, R_NOTE,
+           L"Rechtsklick auf eine App im Dock → „Icon ändern …“ wählt ein PNG für genau diese "
+           L"App. „Windows-Icon verwenden“ macht es rückgängig.",
+           L"Right-click an app in the dock → \"Change icon …\" picks a PNG for that app. "
+           L"\"Use Windows icon\" undoes it.");
+    AddRow(3, R_FOLDER, L"Icon-Ordner", L"Icon folder", nullptr, 0, 0, L"", ID_FOLDER);
+    AddRow(3, R_BUTTON, L"Per Rechtsklick gewählte Icons entfernen",
+           L"Remove icons chosen by right-click", nullptr, 0, 0, L"", ID_RESETICONS);
+    // Indicator
+    AddRow(4, R_SECTION, L"Punkt", L"Dot");
+    AddRow(4, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
+    AddRow(4, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
+           L"px");
+    AddRow(4, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
+           L"px");
+    AddRow(4, R_SECTION, L"Farben", L"Colors");
+    AddRow(4, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
+    AddRow(4, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
+    AddRow(4, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
+           L"dotAttentionColor");
+    // About
+    AddRow(5, R_SECTION, L"macOS Dock", L"macOS Dock");
+    AddRow(5, R_NOTE,
+           L"Verwandelt die Windows-11-Taskleiste in ein macOS-Dock. Alle Änderungen werden "
+           L"sofort übernommen und gespeichert.",
+           L"Turns the Windows 11 taskbar into a macOS dock. All changes apply and save "
+           L"immediately.");
+    AddRow(5, R_NOTE,
+           L"Dieses Fenster öffnest du mit einem Rechtsklick auf ein Icon im Dock → "
+           L"„Dock-Einstellungen …“.",
+           L"Open this window by right-clicking an icon in the dock → \"Dock settings …\".");
+}
+
+int LayoutRows(UINT dpi) {
+    auto S = [&](int v) { return MulDiv(v, dpi, 96); };
+    int x0 = S(248), x1 = S(852), maxY = 0;
+    for (int p = 0; p < kPageCount; p++) {
+        int y = S(96);
+        bool first = true;
+        for (auto& r : g_rows) {
+            if (r.page != p) continue;
+            int h = S(r.h);
+            if (r.type == R_SECTION && !first) y += S(14);
+            r.rc = {x0, y, x1, y + h};
+            y += h + (r.type == R_SECTION ? 0 : S(2));
+            first = false;
+        }
+        maxY = std::max(maxY, y);
+    }
+    return maxY + S(24);
+}
+
+Row* FindRow(int id) {
+    for (auto& r : g_rows) {
+        if (r.id == id) return &r;
+    }
+    return nullptr;
+}
+
+// ---------- colors of the window ----------
+struct UiColors {
+    COLORREF bg, side, card, text, sub, border, input, accent;
+    bool dark;
+} g_uc;
+HBRUSH g_brCard, g_brInput;
+
+COLORREF Blend(COLORREF a, COLORREF b, int pctA) {
+    return RGB((GetRValue(a) * pctA + GetRValue(b) * (100 - pctA)) / 100,
+               (GetGValue(a) * pctA + GetGValue(b) * (100 - pctA)) / 100,
+               (GetBValue(a) * pctA + GetBValue(b) * (100 - pctA)) / 100);
+}
+
+COLORREF TextOn(COLORREF bg) {
+    int lum = (GetRValue(bg) * 299 + GetGValue(bg) * 587 + GetBValue(bg) * 114) / 1000;
+    return lum > 160 ? RGB(0, 0, 0) : RGB(255, 255, 255);
+}
+
+COLORREF WindowsAccent() {
+    DWORD v = 0, sz = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", L"AccentColor",
+                     RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS) {
+        return RGB(v & 255, (v >> 8) & 255, (v >> 16) & 255);
+    }
+    return RGB(0, 103, 192);
+}
+
+void UpdateColors() {
+    bool d = macdock::IsWindowsDarkMode();
+    g_uc.dark = d;
+    g_uc.bg = d ? RGB(32, 32, 32) : RGB(243, 243, 243);
+    g_uc.side = d ? RGB(26, 26, 26) : RGB(235, 235, 235);
+    g_uc.card = d ? RGB(43, 43, 43) : RGB(251, 251, 251);
+    g_uc.text = d ? RGB(255, 255, 255) : RGB(26, 26, 26);
+    g_uc.sub = d ? RGB(190, 190, 190) : RGB(96, 96, 96);
+    g_uc.border = d ? RGB(56, 56, 56) : RGB(226, 226, 226);
+    g_uc.input = d ? RGB(55, 55, 55) : RGB(255, 255, 255);
+    g_uc.accent = WindowsAccent();
+    if (g_brCard) DeleteObject(g_brCard);
+    if (g_brInput) DeleteObject(g_brInput);
+    g_brCard = CreateSolidBrush(g_uc.card);
+    g_brInput = CreateSolidBrush(g_uc.input);
+}
+
+Gdiplus::Color GpCol(COLORREF c, int a = 255) {
+    return Gdiplus::Color((BYTE)a, GetRValue(c), GetGValue(c), GetBValue(c));
+}
+
+void AddRoundRect(Gdiplus::GraphicsPath& p, float x, float y, float w, float h, float r) {
+    float d = 2 * r;
+    if (d > w) d = w;
+    if (d > h) d = h;
+    if (d <= 0) {
+        p.AddRectangle(Gdiplus::RectF(x, y, w, h));
+        return;
+    }
+    p.AddArc(x, y, d, d, 180, 90);
+    p.AddArc(x + w - d, y, d, d, 270, 90);
+    p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    p.AddArc(x, y + h - d, d, d, 90, 90);
+    p.CloseFigure();
+}
+
+void FillRoundAA(HDC dc, RECT r, float rad, COLORREF fill, COLORREF border = CLR_INVALID,
+                 int alpha = 255) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::GraphicsPath p;
+    AddRoundRect(p, (float)r.left, (float)r.top, (float)(r.right - r.left - 1),
+                 (float)(r.bottom - r.top - 1), rad);
+    Gdiplus::SolidBrush b(GpCol(fill, alpha));
+    g.FillPath(&b, &p);
+    if (border != CLR_INVALID) {
+        Gdiplus::Pen pen(GpCol(border), 1.0f);
+        g.DrawPath(&pen, &p);
+    }
+}
+
+HFONT MakeFont(int px, int weight, const wchar_t* face) {
+    return CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                       CLEARTYPE_QUALITY, 0, face);
+}
+
+HFONT MakeIconFont(int px) {
+    for (auto face : {L"Segoe Fluent Icons", L"Segoe MDL2 Assets"}) {
+        HFONT f = CreateFontW(-px, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                              ANTIALIASED_QUALITY, 0, face);
+        HDC dc = GetDC(nullptr);
+        HGDIOBJ old = SelectObject(dc, f);
+        wchar_t got[LF_FACESIZE] = L"";
+        GetTextFaceW(dc, LF_FACESIZE, got);
+        SelectObject(dc, old);
+        ReleaseDC(nullptr, dc);
+        if (_wcsicmp(got, face) == 0) return f;
+        DeleteObject(f);
+    }
+    return MakeFont(px, FW_NORMAL, L"Segoe MDL2 Assets");
+}
+
+// ---------- controls ----------
+void ApplyDarkTheme(HWND c, const wchar_t* cls) {
+    if (!g_uc.dark) return;
+    if (!_wcsicmp(cls, L"COMBOBOX") || !_wcsicmp(cls, L"EDIT")) {
+        SetWindowTheme(c, L"DarkMode_CFD", nullptr);
+    } else {
+        SetWindowTheme(c, L"DarkMode_Explorer", nullptr);
+    }
+}
+
+int SliderMax(const Row& r) {
+    // On the left or right the dock goes up to 100%.
+    if (r.key && !wcscmp(r.key, L"scale") && g_side) return macdock::kVerticalMaxScale;
+    return r.max;
+}
+
+void BuildControls(HWND w) {
+    HINSTANCE inst = (HINSTANCE)&__ImageBase;
+    UINT dpi = GetDpiForWindow(w);
+    auto S = [&](int v) { return MulDiv(v, dpi, 96); };
+    g_font = MakeFont(S(14), FW_NORMAL, L"Segoe UI Variable Text");
+    g_fontBold = MakeFont(S(14), FW_SEMIBOLD, L"Segoe UI Variable Text");
+    g_fontSmall = MakeFont(S(12), FW_NORMAL, L"Segoe UI Variable Text");
+    g_fontTitle = MakeFont(S(28), FW_SEMIBOLD, L"Segoe UI Variable Display");
+    g_fontIcon = MakeIconFont(S(16));
+
+    DefineRows();
+    g_clientW = S(880);
+    g_clientH = std::max(LayoutRows(dpi), S(620));
+
+    auto mk = [&](int page, const wchar_t* cls, const wchar_t* text, DWORD style, RECT r,
+                  int id) {
+        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | style, r.left, r.top,
+                                 r.right - r.left, r.bottom - r.top, w,
+                                 (HMENU)(INT_PTR)id, inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+        ApplyDarkTheme(c, cls);
+        g_ctls.push_back({c, page});
+        return c;
+    };
+
+    for (auto& r : g_rows) {
+        RECT rc = r.rc;
+        int right = rc.right - S(16), cy = (rc.top + rc.bottom) / 2;
+        switch (r.type) {
+            case R_TOGGLE:
+                mk(r.page, L"BUTTON", T(r.de, r.en), BS_OWNERDRAW | WS_TABSTOP, rc, r.id);
+                break;
+            case R_SLIDER:
+            case R_ALPHA: {
+                HWND t = mk(r.page, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
+                            {right - S(264), cy - S(14), right - S(70), cy + S(14)}, r.id);
+                SendMessageW(t, TBM_SETRANGE, TRUE, MAKELPARAM(r.min, SliderMax(r)));
+                break;
+            }
+            case R_COMBO: {
+                HWND cb = mk(r.page, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+                             {right - S(240), cy - S(15), right, cy + S(200)}, r.id);
+                if (r.id == ID_POSITION) {
+                    for (auto t : {T(L"Links", L"Left"), T(L"Unten", L"Bottom"),
+                                   T(L"Rechts", L"Right")}) {
+                        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)t);
+                    }
+                } else {
+                    for (auto t : {T(L"Wie Windows", L"Follow Windows"), T(L"Hell", L"Light"),
+                                   T(L"Dunkel", L"Dark")}) {
+                        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)t);
+                    }
+                }
+                break;
+            }
+            case R_COLOR:
+                mk(r.page, L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP,
+                   {right - S(56), cy - S(14), right, cy + S(14)}, r.id);
+                break;
+            case R_BUTTON:
+                mk(r.page, L"BUTTON", T(L"Zurücksetzen", L"Reset"), BS_PUSHBUTTON | WS_TABSTOP,
+                   {right - S(160), cy - S(16), right, cy + S(16)}, r.id);
+                break;
+            case R_FOLDER:
+                mk(r.page, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER,
+                   {right - S(300), cy - S(14), right - S(44), cy + S(14)}, ID_FOLDER);
+                mk(r.page, L"BUTTON", L"…", BS_PUSHBUTTON | WS_TABSTOP,
+                   {right - S(38), cy - S(15), right, cy + S(15)}, ID_FOLDERBROWSE);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void SetPage(HWND w, int page) {
+    g_page = page;
+    for (auto& c : g_ctls) ShowWindow(c.hwnd, c.page == page ? SW_SHOW : SW_HIDE);
+    InvalidateRect(w, nullptr, FALSE);
+}
+
+int AlphaPercent(const wchar_t* colorKey) {
+    BYTE a = 255;
+    COLORREF rgb = 0;
+    ParseColor(Str(colorKey), &a, &rgb);
+    return (a * 100 + 127) / 255;
+}
+
+int SliderValue(const Row& r) {
+    if (r.type == R_ALPHA) return AlphaPercent(r.key);
+    int v = Int(r.key);
+    if (!wcscmp(r.key, L"scale") && v <= 0) v = 100;
+    return std::clamp(v, r.min, SliderMax(r));
+}
+
+std::wstring SliderText(const Row& r) {
+    wchar_t b[32];
+    int v = SliderValue(r);
+    swprintf(b, 32, *r.unit ? L"%d %ls" : L"%d", v, r.unit);
+    return b;
+}
+
+void SyncControls(HWND w) {
+    g_syncing = true;
+    for (auto& r : g_rows) {
+        HWND c = GetDlgItem(w, r.id);
+        if (!c) continue;
+        switch (r.type) {
+            case R_SLIDER:
+            case R_ALPHA:
+                SendMessageW(c, TBM_SETPOS, TRUE, SliderValue(r));
+                break;
+            case R_COMBO:
+                if (r.id == ID_POSITION) {
+                    UINT edge = macdock::GetTaskbarEdge();
+                    SendMessageW(c, CB_SETCURSEL,
+                                 edge == ABE_LEFT ? 0 : edge == ABE_RIGHT ? 2 : 1, 0);
+                } else {
+                    std::wstring a = Str(L"appearance");
+                    SendMessageW(c, CB_SETCURSEL, a == L"light" ? 1 : a == L"dark" ? 2 : 0, 0);
+                }
+                break;
+            default:
+                InvalidateRect(c, nullptr, FALSE);
+                break;
+        }
+    }
+    SetDlgItemTextW(w, ID_FOLDER, Str(L"iconFolder").c_str());
+    InvalidateRect(w, nullptr, FALSE);
+    g_syncing = false;
+}
+
+// ---------- painting ----------
+RECT NavRect(int i, UINT dpi) {
+    auto S = [&](int v) { return MulDiv(v, dpi, 96); };
+    return {S(12), S(76) + i * S(42), S(208), S(76) + i * S(42) + S(38)};
+}
+
+void Paint(HWND w, HDC hdc) {
+    RECT rc;
+    GetClientRect(w, &rc);
+    UINT dpi = GetDpiForWindow(w);
+    auto S = [&](int v) { return MulDiv(v, dpi, 96); };
+    HDC mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    SetBkMode(mem, TRANSPARENT);
+
+    HBRUSH bg = CreateSolidBrush(g_uc.bg);
+    FillRect(mem, &rc, bg);
+    DeleteObject(bg);
+    RECT side{0, 0, S(220), rc.bottom};
+    HBRUSH sb = CreateSolidBrush(g_uc.side);
+    FillRect(mem, &side, sb);
+    DeleteObject(sb);
+
+    auto text = [&](const std::wstring& s, RECT r, HFONT f, COLORREF c, UINT fmt) {
+        SelectObject(mem, f);
+        SetTextColor(mem, c);
+        DrawTextW(mem, s.c_str(), -1, &r, fmt | DT_NOPREFIX);
+    };
+
+    text(L"Dock", {S(24), S(22), S(208), S(56)}, g_fontBold, g_uc.text,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (int i = 0; i < kPageCount; i++) {
+        RECT nr = NavRect(i, dpi);
+        if (i == g_page || i == g_hoverNav) {
+            FillRoundAA(mem, nr, (float)S(6),
+                        i == g_page ? g_uc.card : Blend(g_uc.card, g_uc.side, 55));
+        }
+        if (i == g_page) {
+            RECT bar{nr.left, nr.top + S(10), nr.left + S(3), nr.bottom - S(10)};
+            FillRoundAA(mem, bar, S(3) / 2.0f, g_uc.accent);
+        }
+        text(kPages[i].glyph, {nr.left + S(12), nr.top, nr.left + S(40), nr.bottom}, g_fontIcon,
+             g_uc.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(T(kPages[i].de, kPages[i].en), {nr.left + S(46), nr.top, nr.right, nr.bottom},
+             i == g_page ? g_fontBold : g_font, g_uc.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // Title and the position the values belong to
+    text(T(kPages[g_page].de, kPages[g_page].en), {S(248), S(18), S(852), S(62)}, g_fontTitle,
+         g_uc.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    std::wstring badge = g_side ? T(L"Gilt für: Dock links/rechts", L"Applies to: dock left/right")
+                                : T(L"Gilt für: Dock unten", L"Applies to: dock at the bottom");
+    RECT br{S(248), S(62), S(852), S(84)};
+    text(badge, br, g_fontSmall, g_uc.sub, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    for (auto& r : g_rows) {
+        if (r.page != g_page) continue;
+        RECT c = r.rc;
+        if (r.type == R_SECTION) {
+            text(T(r.de, r.en), {c.left + S(2), c.top, c.right, c.bottom - S(6)}, g_fontBold,
+                 g_uc.text, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+            continue;
+        }
+        if (r.type == R_TOGGLE) continue;  // owner-drawn
+        FillRoundAA(mem, c, (float)S(6), g_uc.card, g_uc.border);
+        if (r.type == R_NOTE) {
+            text(T(r.de, r.en), {c.left + S(16), c.top + S(10), c.right - S(16), c.bottom - S(8)},
+                 g_font, g_uc.sub, DT_LEFT | DT_WORDBREAK);
+            continue;
+        }
+        int labelRight = r.type == R_FOLDER ? c.right - S(320) : c.right - S(280);
+        text(T(r.de, r.en), {c.left + S(16), c.top, labelRight, c.bottom}, g_font, g_uc.text,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (r.type == R_SLIDER || r.type == R_ALPHA) {
+            text(SliderText(r), {c.right - S(70), c.top, c.right - S(16), c.bottom}, g_font,
+                 g_uc.sub, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+        if (r.type == R_COLOR) {
+            text(Str(r.key), {c.right - S(200), c.top, c.right - S(68), c.bottom}, g_fontSmall,
+                 g_uc.sub, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+}
+
+void DrawItem(const DRAWITEMSTRUCT* d) {
+    RECT r = d->rcItem;
+    int w = r.right - r.left, h = r.bottom - r.top;
+    HDC mem = CreateCompatibleDC(d->hDC);
+    HBITMAP bmp = CreateCompatibleBitmap(d->hDC, w, h);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    SetBkMode(mem, TRANSPARENT);
+    UINT dpi = GetDpiForWindow(d->hwndItem);
+    auto S = [&](int v) { return MulDiv(v, dpi, 96); };
+    RECT lr{0, 0, w, h};
+    Row* row = FindRow((int)d->CtlID);
+
+    if (row && row->type == R_TOGGLE) {
+        HBRUSH bg = CreateSolidBrush(g_uc.bg);
+        FillRect(mem, &lr, bg);
+        DeleteObject(bg);
+        FillRoundAA(mem, lr, (float)S(6), g_uc.card, g_uc.border);
+        bool on = Int(row->key) != 0;
+        SelectObject(mem, g_font);
+        SetTextColor(mem, g_uc.text);
+        RECT tr{S(16), 0, w - S(110), h};
+        DrawTextW(mem, T(row->de, row->en), -1, &tr,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SetTextColor(mem, g_uc.sub);
+        RECT st{w - S(110), 0, w - S(66), h};
+        DrawTextW(mem, on ? T(L"Ein", L"On") : T(L"Aus", L"Off"), -1, &st,
+                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        float sw = (float)S(40), sh = (float)S(20);
+        float sx = (float)(w - S(16)) - sw, sy = (h - sh) / 2;
+        Gdiplus::Graphics g(mem);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        Gdiplus::GraphicsPath pill;
+        AddRoundRect(pill, sx, sy, sw, sh, sh / 2);
+        float kd = sh - (float)S(8);
+        if (on) {
+            Gdiplus::SolidBrush ab(GpCol(g_uc.accent));
+            g.FillPath(&ab, &pill);
+            Gdiplus::SolidBrush kb(GpCol(TextOn(g_uc.accent)));
+            g.FillEllipse(&kb, sx + sw - kd - S(4), sy + S(4), kd, kd);
+        } else {
+            Gdiplus::Pen pp(GpCol(g_uc.sub), 1.0f);
+            g.DrawPath(&pp, &pill);
+            Gdiplus::SolidBrush kb(GpCol(g_uc.sub));
+            g.FillEllipse(&kb, sx + S(4), sy + S(4), kd, kd);
+        }
+    } else if (row && row->type == R_COLOR) {
+        HBRUSH bg = CreateSolidBrush(g_uc.card);
+        FillRect(mem, &lr, bg);
+        DeleteObject(bg);
+        BYTE a = 255;
+        COLORREF col = RGB(128, 128, 128);
+        ParseColor(Str(row->key), &a, &col);
+        // Checkerboard under the color, so the opacity can be seen.
+        FillRoundAA(mem, lr, (float)S(5), RGB(255, 255, 255), g_uc.sub);
+        for (int y = 0; y < h; y += S(6)) {
+            for (int x = ((y / S(6)) % 2) * S(6); x < w; x += S(12)) {
+                RECT q{x, y, std::min(x + S(6), w), std::min(y + S(6), h)};
+                HBRUSH qb = CreateSolidBrush(RGB(204, 204, 204));
+                FillRect(mem, &q, qb);
+                DeleteObject(qb);
+            }
+        }
+        FillRoundAA(mem, lr, (float)S(5), col, g_uc.sub, a);
+    }
+    BitBlt(d->hDC, r.left, r.top, w, h, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+}
+
+int NavHit(HWND w, POINT p) {
+    UINT dpi = GetDpiForWindow(w);
+    for (int i = 0; i < kPageCount; i++) {
+        RECT nr = NavRect(i, dpi);
+        if (PtInRect(&nr, p)) return i;
+    }
+    return -1;
+}
+
+// ---------- actions ----------
+void RestartExplorer() {
+    WCHAR cmd[MAX_PATH * 2];
+    ExpandEnvironmentStringsW(
+        L"\"%SystemRoot%\\System32\\cmd.exe\" /c taskkill /f /im explorer.exe & "
+        L"start \"\" \"%SystemRoot%\\explorer.exe\"",
+        cmd, ARRAYSIZE(cmd));
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si,
+                       &pi) ||
+        CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                       nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+}
+
+void SetPosition(HWND w, int sel) {
+    // Windows setting "Taskbar position": 0 = left, 2 = right, 3 = bottom.
+    DWORD value = sel == 0 ? 0 : sel == 2 ? 2 : 3;
+    UINT edge = macdock::GetTaskbarEdge();
+    DWORD current = edge == ABE_LEFT ? 0 : edge == ABE_RIGHT ? 2 : 3;
+    if (value == current) return;
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER,
+                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", 0,
+                        nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(key, L"TaskbarLocation", 0, REG_DWORD, (const BYTE*)&value,
+                       sizeof(value));
+        RegCloseKey(key);
+    }
+    RestartExplorer();
+}
+
+std::wstring ExpandedIconFolder() {
+    std::wstring folder = macdock::GetStrFor(false, L"iconFolder");
+    WCHAR expanded[MAX_PATH * 2];
+    DWORD len = ExpandEnvironmentStringsW(folder.c_str(), expanded, ARRAYSIZE(expanded));
+    if (len > 0 && len <= ARRAYSIZE(expanded)) folder = expanded;
+    while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) {
+        folder.pop_back();
+    }
+    return folder;
+}
+
+void PickColor(HWND w, Row& r) {
+    static COLORREF custom[16];
+    BYTE a = 255;
+    COLORREF col = RGB(255, 255, 255);
+    ParseColor(Str(r.key), &a, &col);
+    CHOOSECOLORW cc{sizeof(cc)};
+    cc.hwndOwner = w;
+    cc.rgbResult = col;
+    cc.lpCustColors = custom;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (ChooseColorW(&cc)) {
+        SetStr(w, r.key, FormatColor(a, cc.rgbResult));
+        InvalidateRect(GetDlgItem(w, r.id), nullptr, FALSE);
+        InvalidateRect(w, &r.rc, FALSE);
+    }
+}
+
+void BrowseFolder(HWND w) {
+    BROWSEINFOW bi{};
+    bi.hwndOwner = w;
+    bi.lpszTitle = T(L"Ordner mit den PNG-Icons wählen", L"Choose the folder with the PNG icons");
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return;
+    WCHAR path[MAX_PATH];
+    if (SHGetPathFromIDListW(pidl, path)) {
+        macdock::SetStrFor(false, L"iconFolder", path);
+        SetDlgItemTextW(w, ID_FOLDER, path);
+        Apply(w);
+    }
+    CoTaskMemFree(pidl);
+}
+
+// ---------- window ----------
+LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_CREATE: {
+            UpdateColors();
+            BOOL dark = g_uc.dark;
+            DwmSetWindowAttribute(w, 20, &dark, sizeof(dark));
+            COLORREF cap = g_uc.side, capText = g_uc.text;
+            DwmSetWindowAttribute(w, 35, &cap, sizeof(cap));
+            DwmSetWindowAttribute(w, 36, &capText, sizeof(capText));
+            BuildControls(w);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(w, &ps);
+            Paint(w, dc);
+            EndPaint(w, &ps);
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            SetBkColor((HDC)wp, g_uc.card);
+            SetTextColor((HDC)wp, g_uc.text);
+            return (LRESULT)g_brCard;
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            SetBkColor((HDC)wp, g_uc.input);
+            SetTextColor((HDC)wp, g_uc.text);
+            return (LRESULT)g_brInput;
+        case WM_DRAWITEM:
+            DrawItem((const DRAWITEMSTRUCT*)lp);
+            return TRUE;
+        case WM_MOUSEMOVE: {
+            if (!g_navTracking) {
+                TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, w, 0};
+                TrackMouseEvent(&t);
+                g_navTracking = true;
+            }
+            int hv = NavHit(w, {(short)LOWORD(lp), (short)HIWORD(lp)});
+            if (hv != g_hoverNav) {
+                g_hoverNav = hv;
+                InvalidateRect(w, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            g_navTracking = false;
+            if (g_hoverNav != -1) {
+                g_hoverNav = -1;
+                InvalidateRect(w, nullptr, FALSE);
+            }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            int nv = NavHit(w, {(short)LOWORD(lp), (short)HIWORD(lp)});
+            if (nv >= 0 && nv != g_page) SetPage(w, nv);
+            return 0;
+        }
+        case WM_HSCROLL: {
+            HWND t = (HWND)lp;
+            Row* r = FindRow(GetDlgCtrlID(t));
+            if (!r || g_syncing) return 0;
+            int v = (int)SendMessageW(t, TBM_GETPOS, 0, 0);
+            if (r->type == R_ALPHA) {
+                BYTE a = 255;
+                COLORREF col = RGB(255, 255, 255);
+                ParseColor(Str(r->key), &a, &col);
+                SetStr(w, r->key, FormatColor((BYTE)((v * 255 + 50) / 100), col));
+                for (auto& o : g_rows) {
+                    if (o.type == R_COLOR && o.key && !wcscmp(o.key, r->key)) {
+                        InvalidateRect(GetDlgItem(w, o.id), nullptr, FALSE);
+                        InvalidateRect(w, &o.rc, FALSE);
+                    }
+                }
+            } else {
+                SetInt(w, r->key, v);
+            }
+            InvalidateRect(w, &r->rc, FALSE);
+            return 0;
+        }
+        case WM_TIMER:
+            if (wp == kApplyTimer) {
+                KillTimer(w, kApplyTimer);
+                ReloadNow();
+            }
+            return 0;
+        case WM_COMMAND: {
+            int id = LOWORD(wp), code = HIWORD(wp);
+            if (g_syncing) return 0;
+            Row* r = FindRow(id);
+            if (r && r->type == R_TOGGLE && code == BN_CLICKED) {
+                SetInt(w, r->key, Int(r->key) ? 0 : 1);
+                InvalidateRect((HWND)lp, nullptr, FALSE);
+                return 0;
+            }
+            if (r && r->type == R_COLOR && code == BN_CLICKED) {
+                PickColor(w, *r);
+                return 0;
+            }
+            if (id == ID_POSITION && code == CBN_SELCHANGE) {
+                SetPosition(w, (int)SendMessageW((HWND)lp, CB_GETCURSEL, 0, 0));
+                return 0;
+            }
+            if (id == ID_APPEARANCE && code == CBN_SELCHANGE) {
+                int sel = (int)SendMessageW((HWND)lp, CB_GETCURSEL, 0, 0);
+                SetStr(w, L"appearance", sel == 1 ? L"light" : sel == 2 ? L"dark" : L"auto");
+                return 0;
+            }
+            if (id == ID_FOLDER && code == EN_KILLFOCUS) {
+                WCHAR buf[MAX_PATH * 2] = L"";
+                GetDlgItemTextW(w, ID_FOLDER, buf, ARRAYSIZE(buf));
+                if (macdock::GetStrFor(false, L"iconFolder") != buf) {
+                    macdock::SetStrFor(false, L"iconFolder", buf);
+                    Apply(w);
+                }
+                return 0;
+            }
+            if (id == ID_FOLDERBROWSE && code == BN_CLICKED) {
+                BrowseFolder(w);
+                return 0;
+            }
+            if (id == ID_RESET && code == BN_CLICKED) {
+                if (MessageBoxW(w,
+                                T(L"Alle Werte dieser Position auf Standard zurücksetzen?",
+                                  L"Reset all values of this position?"),
+                                T(L"Zurücksetzen", L"Reset"),
+                                MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    macdock::ResetProfile(g_side);
+                    SyncControls(w);
+                    Apply(w);
+                }
+                return 0;
+            }
+            if (id == ID_RESETICONS && code == BN_CLICKED) {
+                if (MessageBoxW(w,
+                                T(L"Alle per Rechtsklick gewählten Icons entfernen?",
+                                  L"Remove all icons chosen by right-click?"),
+                                T(L"Icons", L"Icons"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    Wh_DeleteValue(L"g.icons");
+                    Apply(w);
+                }
+                return 0;
+            }
+            if (id == IDCANCEL) DestroyWindow(w);
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+            // Light/dark switched in Windows: rebuild with the new colors.
+            if (lp && !wcscmp((LPCWSTR)lp, L"ImmersiveColorSet") &&
+                macdock::IsWindowsDarkMode() != g_uc.dark) {
+                PostMessageW(w, WM_DOCKUI_REBUILD, 0, 0);
+            }
+            return 0;
+        case WM_DOCKUI_REBUILD: {
+            int page = g_page;
+            DestroyWindow(w);
+            g_page = page;
+            PostThreadMessageW(GetCurrentThreadId(), WM_DOCKUI_SHOW, 0, 0);
+            return 0;
+        }
+        case WM_DESTROY:
+            if (KillTimer(w, kApplyTimer)) ReloadNow();
+            g_wnd = nullptr;
+            g_ctls.clear();
+            for (HFONT* f : {&g_font, &g_fontBold, &g_fontTitle, &g_fontSmall, &g_fontIcon}) {
+                if (*f) {
+                    DeleteObject(*f);
+                    *f = nullptr;
+                }
+            }
+            return 0;
+    }
+    return DefWindowProcW(w, msg, wp, lp);
+}
+
+void ShowWindowNow() {
+    if (g_wnd) {
+        ShowWindow(g_wnd, SW_RESTORE);
+        SetForegroundWindow(g_wnd);
+        return;
+    }
+    g_side = macdock::IsVerticalEdge(macdock::GetTaskbarEdge());
+    HINSTANCE inst = (HINSTANCE)&__ImageBase;
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    g_wnd = CreateWindowExW(0, kWndClass, T(L"Dock – Einstellungen", L"Dock – Settings"), style,
+                            CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, inst,
+                            nullptr);
+    if (!g_wnd) return;
+    UINT dpi = GetDpiForWindow(g_wnd);
+    RECT r{0, 0, g_clientW, g_clientH};
+    AdjustWindowRectExForDpi(&r, style, FALSE, 0, dpi);
+    int ww = r.right - r.left, wh = r.bottom - r.top;
+    POINT pt;
+    GetCursorPos(&pt);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY), &mi);
+    int x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - ww) / 2;
+    int y = std::max(mi.rcWork.top, mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - wh) / 2);
+    SetWindowPos(g_wnd, nullptr, x, y, ww, wh, SWP_NOZORDER);
+    SetPage(g_wnd, g_page);
+    SyncControls(g_wnd);
+    ShowWindow(g_wnd, SW_SHOW);
+    SetForegroundWindow(g_wnd);
+}
+
+// Icon picker for one app, from the right-click menu.
+void ChangeIcon(const std::wstring& appId, const std::wstring& appName) {
+    std::wstring folder = ExpandedIconFolder();
+    WCHAR file[MAX_PATH * 2] = L"";
+    std::wstring title = std::wstring(T(L"Icon wählen", L"Choose icon")) +
+                         (appName.empty() ? L"" : L" – " + appName);
+    OPENFILENAMEW ofn{sizeof(ofn)};
+    ofn.lpstrFilter = g_de ? L"Bilder (*.png)\0*.png\0Alle Bilder\0*.png;*.jpg;*.jpeg;*.bmp;*.ico\0"
+                           : L"Images (*.png)\0*.png\0All images\0*.png;*.jpg;*.jpeg;*.bmp;*.ico\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = ARRAYSIZE(file);
+    ofn.lpstrInitialDir = folder.c_str();
+    ofn.lpstrTitle = title.c_str();
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    std::wstring chosen = file;
+    // Inside the icon folder only the file name is stored.
+    if (!folder.empty() && chosen.size() > folder.size() + 1 &&
+        _wcsnicmp(chosen.c_str(), folder.c_str(), folder.size()) == 0 &&
+        (chosen[folder.size()] == L'\\' || chosen[folder.size()] == L'/')) {
+        chosen = chosen.substr(folder.size() + 1);
+    }
+    macdock::SetIconFor(appId, chosen);
+    ReloadNow();
+}
+
+struct IconRequest {
+    std::wstring appId, appName;
+};
+
+DWORD WINAPI ThreadProc(LPVOID) {
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    g_de = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_GERMAN;
+    Gdiplus::GdiplusStartupInput gdipInput;
+    Gdiplus::GdiplusStartup(&g_gdipToken, &gdipInput, nullptr);
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
+    InitCommonControlsEx(&icc);
+
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = (HINSTANCE)&__ImageBase;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = kWndClass;
+    RegisterClassExW(&wc);
+
+    MSG msg;
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // create the queue
+    SetEvent(g_threadReady);
+
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!msg.hwnd) {
+            if (msg.message == WM_DOCKUI_SHOW) {
+                ShowWindowNow();
+            } else if (msg.message == WM_DOCKUI_ICON) {
+                auto* req = (IconRequest*)msg.lParam;
+                ChangeIcon(req->appId, req->appName);
+                delete req;
+            }
+            continue;
+        }
+        if (g_wnd && IsDialogMessageW(g_wnd, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    if (g_wnd) DestroyWindow(g_wnd);
+    UnregisterClassW(kWndClass, (HINSTANCE)&__ImageBase);
+    if (g_brCard) DeleteObject(g_brCard);
+    if (g_brInput) DeleteObject(g_brInput);
+    g_brCard = g_brInput = nullptr;
+    Gdiplus::GdiplusShutdown(g_gdipToken);
+    CoUninitialize();
+    return 0;
+}
+
+bool EnsureThread() {
+    std::lock_guard<std::mutex> lock(g_threadMutex);
+    if (g_thread) return true;
+    g_threadReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_thread = CreateThread(nullptr, 0, ThreadProc, nullptr, 0, &g_threadId);
+    if (!g_thread) return false;
+    WaitForSingleObject(g_threadReady, 5000);
+    return true;
+}
+
+void StopThread() {
+    std::lock_guard<std::mutex> lock(g_threadMutex);
+    if (!g_thread) return;
+    if (g_wnd) PostMessageW(g_wnd, WM_CLOSE, 0, 0);
+    PostThreadMessageW(g_threadId, WM_QUIT, 0, 0);
+    if (WaitForSingleObject(g_thread, 5000) != WAIT_OBJECT_0) {
+        // A file or color dialog is still open; ask it to close and wait.
+        HWND dlg = nullptr;
+        while ((dlg = FindWindowExW(nullptr, dlg, L"#32770", nullptr))) {
+            if (GetWindowThreadProcessId(dlg, nullptr) == g_threadId) {
+                PostMessageW(dlg, WM_CLOSE, 0, 0);
+            }
+        }
+        PostThreadMessageW(g_threadId, WM_QUIT, 0, 0);
+        WaitForSingleObject(g_thread, INFINITE);
+    }
+    CloseHandle(g_thread);
+    CloseHandle(g_threadReady);
+    g_thread = nullptr;
+    g_threadReady = nullptr;
+}
+
+}  // namespace dockui
+
+void DockUiShowSettings() {
+    if (dockui::EnsureThread()) {
+        PostThreadMessageW(dockui::g_threadId, dockui::WM_DOCKUI_SHOW, 0, 0);
+    }
+}
+
+void DockUiChangeIcon(const std::wstring& appId, const std::wstring& appName) {
+    if (dockui::EnsureThread()) {
+        auto* req = new dockui::IconRequest{appId, appName};
+        if (!PostThreadMessageW(dockui::g_threadId, dockui::WM_DOCKUI_ICON, 0, (LPARAM)req)) {
+            delete req;
+        }
+    }
+}
+
+void DockUiStop() {
+    dockui::StopThread();
 }

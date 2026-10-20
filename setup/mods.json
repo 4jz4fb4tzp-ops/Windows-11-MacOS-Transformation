@@ -241,7 +241,7 @@
     {
       "id": "macos-dock-taskbar",
       "name": "macOS Dock",
-      "version": "1.12",
+      "version": "2.0",
       "include": [
         "explorer.exe"
       ],
@@ -249,7 +249,7 @@
       "architecture": [
         "x86-64"
       ],
-      "compilerOptions": "-lcomctl32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshcore -lversion",
+      "compilerOptions": "-lcomctl32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshcore -lversion -lgdiplus -lcomdlg32 -ldwmapi -luxtheme -lshell32",
       "settings": {
         "scale": 120,
         "autoTaskbarHeight": 1,
