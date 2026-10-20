@@ -61,6 +61,13 @@ keep their settings; turn on **Reset settings** in `Setup.exe` (or run
 `Setup.cmd -ResetSettings`) to apply the recommended settings again. After the setup, pin `Files\Trash.lnk` to the taskbar and
 right-click the apps in the dock → **Change icon …** to assign icons.
 
+### Updating
+
+Download the new release and run `Setup.exe` again. It detects the existing
+installation and only updates: your dock and mod settings, icons, taskbar
+options and mods you turned off stay as they are. The optional mods you already
+use are preselected.
+
 The manual steps below do the same by hand.
 
 ## Requirements
@@ -188,6 +195,7 @@ with:
   
 ## Changelog
 
+- **New:** running `Setup.exe` again updates an existing installation and keeps all settings, icons, taskbar options and turned-off mods.
 - **New:** `Setup.exe`, a setup with a window: pick the optional mods and the icon pack, then watch the progress of every step. `Setup.cmd` still works.
 - **New:** Stage Manager mod (`stage-manager-taskbar-aware.wh.cpp`) and Top Menu Bar 0.32.0 with a Stage Manager tile in the Control Center.
 - **New:** `macos-minimize-animation-dock.wh.cpp`, a fork of *MacOS Minimize Animation* whose genie flows sideways into the dock when it's on the left or right. The setup installs it instead of the catalog mod and disables the original.

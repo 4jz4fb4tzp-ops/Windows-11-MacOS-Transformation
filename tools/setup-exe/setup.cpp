@@ -193,6 +193,20 @@ std::wstring GermanQuestion(const std::wstring& id, const std::wstring& fallback
 }
 
 std::wstring g_baseDir, g_scriptPath;
+bool g_update;  // the dock is already installed: this run is an update
+
+// Windhawk keeps one registry key per mod; "Disabled" = 1 means turned off.
+bool ModInstalled(const std::wstring& regId, bool* enabled = nullptr) {
+    HKEY key;
+    std::wstring path = L"SOFTWARE\\Windhawk\\Engine\\Mods\\" + regId;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
+        return false;
+    DWORD v = 0, sz = sizeof(v);
+    RegQueryValueExW(key, L"Disabled", nullptr, nullptr, (BYTE*)&v, &sz);
+    RegCloseKey(key);
+    if (enabled) *enabled = v != 1;
+    return true;
+}
 
 bool LoadManifest() {
     std::wstring text = ReadUtf8File(g_baseDir + L"\\setup\\mods.json");
@@ -215,7 +229,9 @@ bool LoadManifest() {
         if (a != std::wstring::npos && b != std::wstring::npos && b > a) q = q.substr(a + 1, b - a - 1);
         if (!q.empty()) q[0] = towupper(q[0]);
         om.question = g_de ? GermanQuestion(om.id, q) : q;
-        om.selected = om.id == L"three-finger-drag" || om.id == L"stage-manager-taskbar-aware";
+        bool enabled = false;
+        if (g_update) om.selected = ModInstalled(L"local@" + om.id, &enabled) && enabled;
+        else om.selected = om.id == L"three-finger-drag" || om.id == L"stage-manager-taskbar-aware";
         g_optional.push_back(om);
     }
     return true;
@@ -477,6 +493,11 @@ void PaintContent(Gdiplus::Graphics& g, HDC dc, RECT rc) {
     };
 
     if (g_page == P_WELCOME) {
+        if (g_update)
+            title(T(L"Update", L"Update"),
+                  T(L"Eine Version ist schon installiert. Das Update behält deine Einstellungen, Icons und die Taskleiste.",
+                    L"A version is already installed. The update keeps your settings, icons and taskbar."));
+        else
         title(T(L"Willkommen", L"Welcome"),
               T(L"Dieses Setup verwandelt Windows 11 in einen Mac-Look: Dock, Menüleiste, Animationen und mehr.",
                 L"This setup turns Windows 11 into a Mac look: dock, menu bar, animations and more."));
@@ -506,7 +527,7 @@ void PaintContent(Gdiplus::Graphics& g, HDC dc, RECT rc) {
                      {r.left + S(60), r.top + S(30), r.right - S(12), r.bottom - S(6)}, g_fontSmall, C.sub,
                      DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
-        DrawLabel(dc,
+        if (!g_update) DrawLabel(dc,
                  T(L"Windhawk wird bei Bedarf mitinstalliert. Die Installation braucht Admin-Rechte, dauert ein "
                    L"paar Minuten und startet am Ende den Explorer neu.",
                    L"Windhawk is installed if needed. The installation needs admin rights, takes a few minutes "
@@ -534,7 +555,7 @@ void PaintContent(Gdiplus::Graphics& g, HDC dc, RECT rc) {
     } else if (g_page == P_INSTALL || g_page == P_FINISH) {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_page == P_INSTALL) {
-            title(T(L"Installation läuft …", L"Installing …"),
+            title(g_update ? T(L"Update läuft …", L"Updating …") : T(L"Installation läuft …", L"Installing …"),
                   T(L"Das dauert ein paar Minuten. Die eigenen Mods werden dabei kompiliert.",
                     L"This takes a few minutes while the custom mods are compiled."));
         } else if (!g_fatal.empty()) {
@@ -545,7 +566,7 @@ void PaintContent(Gdiplus::Graphics& g, HDC dc, RECT rc) {
             title(T(L"Fertig – mit Fehlern", L"Done – with errors"),
                   std::wstring(T(L"Nicht installiert: ", L"Not installed: ")) + list);
         } else {
-            title(T(L"Fertig!", L"All done!"),
+            title(g_update ? T(L"Update fertig!", L"Update done!") : T(L"Fertig!", L"All done!"),
                   T(L"Viel Spaß mit deinem Mac-Look. Rechtsklick auf ein App-Icon im Dock öffnet die Dock-Einstellungen.",
                     L"Enjoy your Mac look. Right-click an app in the dock to open the dock settings."));
         }
@@ -852,7 +873,7 @@ void UpdatePage() {
                                                : T(L"Details anzeigen", L"Show details"));
     ShowWindow(g_btnBack, g_page == P_OPTIONS ? SW_SHOW : SW_HIDE);
     const wchar_t* next = g_page == P_WELCOME   ? T(L"Weiter", L"Continue")
-                          : g_page == P_OPTIONS ? T(L"Installieren", L"Install")
+                          : g_page == P_OPTIONS ? (g_update ? T(L"Aktualisieren", L"Update") : T(L"Installieren", L"Install"))
                           : g_page == P_INSTALL ? T(L"Bitte warten", L"Please wait")
                                                 : T(L"Fertig", L"Done");
     SetWindowTextW(g_btnNext, next);
@@ -1038,6 +1059,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     g_baseDir = exe;
     g_baseDir = g_baseDir.substr(0, g_baseDir.find_last_of(L"\\/"));
     g_scriptPath = g_baseDir + L"\\setup\\Setup.ps1";
+    g_update = ModInstalled(L"local@macos-dock-taskbar");
     if (GetFileAttributesW(g_scriptPath.c_str()) == INVALID_FILE_ATTRIBUTES || !LoadManifest()) {
         MessageBoxW(nullptr,
                     T(L"Die Setup-Dateien fehlen. Entpacke zuerst das ganze ZIP von GitHub und starte Setup.exe "

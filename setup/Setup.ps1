@@ -225,6 +225,9 @@ $EnginePath   = Resolve-StoragePath $ini['EnginePath']
 $CompilerPath = Resolve-StoragePath $ini['CompilerPath']
 $RegistryKey  = $ini['RegistryKey'] -replace '^(HKEY_LOCAL_MACHINE|HKLM)\\', 'HKLM:\' -replace '^(HKEY_CURRENT_USER|HKCU)\\', 'HKCU:\'
 $ModsRegPath  = "$RegistryKey\Engine\Mods"
+# An existing dock means this run is an update: keep settings, taskbar options and disabled mods.
+$IsUpdate     = Test-Path "$ModsRegPath\local@macos-dock-taskbar"
+if ($IsUpdate) { Write-Info 'Existing installation found - updating, your settings are kept.' }
 $ModsDllPath  = Join-Path $AppDataPath 'Engine\Mods'
 $ModsSrcPath  = Join-Path $AppDataPath 'ModsSource'
 $Clang        = Join-Path $CompilerPath 'bin\clang++.exe'
@@ -335,7 +338,7 @@ function Write-ModConfig($regId, $mod, $dllName) {
     # Note: New-Item -Force on an existing registry key would wipe it.
     if (-not $existed) { New-Item -Path $key -Force | Out-Null }
     Set-RegValue $key 'LibraryFileName' $dllName
-    Set-RegValue $key 'Disabled' 0
+    if (-not $existed) { Set-RegValue $key 'Disabled' 0 }  # an update keeps mods the user turned off
     Set-RegValue $key 'Include' ((@($mod.include)) -join '|')
     Set-RegValue $key 'Exclude' ((@($mod.exclude)) -join '|')
     Set-RegValue $key 'Architecture' ((@($mod.architecture)) -join '|')
@@ -400,7 +403,8 @@ if ($optional.Count -gt 0) {
             if ($chosen -contains $mod.id) { [void]$selected.Add($mod); Write-Ok "Selected: $($mod.name)" }
             continue
         }
-        $default = [bool]$All -or ($mod.id -eq 'three-finger-drag')
+        $installed = Test-Path "$ModsRegPath\local@$($mod.id)"
+        $default = [bool]$All -or $installed -or (-not $IsUpdate -and $mod.id -eq 'three-finger-drag')
         if ($All -or (Ask-YesNo $mod.question $default)) { [void]$selected.Add($mod) }
     }
 }
@@ -469,6 +473,7 @@ foreach ($id in $manifest.conflicting) {
 # ---------------------------------------------------------------- 6. Windows taskbar settings
 Send-Gui 'STEP|taskbar'
 Write-Step 'Taskbar settings (centered, no search box, no task view, no widgets)'
+if ($IsUpdate -and -not $ResetSettings) { Write-Info 'Update: your taskbar settings are kept.' } else {
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
 foreach ($pair in @(@($adv, 'TaskbarAl', 1), @($adv, 'ShowTaskViewButton', 0), @($adv, 'TaskbarDa', 0),
                     @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Search', 'SearchboxTaskbarMode', 0))) {
@@ -478,6 +483,7 @@ foreach ($pair in @(@($adv, 'TaskbarAl', 1), @($adv, 'ShowTaskViewButton', 0), @
     } catch { Write-Warn "Could not set $($pair[1]) - change it in Settings > Personalization > Taskbar." }
 }
 Write-Ok 'Done.'
+}
 
 # ---------------------------------------------------------------- 7. Trash shortcut
 Send-Gui 'STEP|trash'
