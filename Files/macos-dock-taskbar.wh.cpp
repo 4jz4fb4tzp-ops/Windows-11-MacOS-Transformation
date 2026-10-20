@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.3
+// @version         2.0.4
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -11338,8 +11338,38 @@ void UpdateVerticalSizes() {
 using TaskbarController_UpdateFrameHeight_t = void(WINAPI*)(void* pThis);
 TaskbarController_UpdateFrameHeight_t
     TaskbarController_UpdateFrameHeight_Original;
+// After an Explorer restart the taskbar can still report the bottom edge
+// while the dock styles are built, and only move to the side a moment later.
+// Rebuild the dock once the position it was built for is outdated.
+std::atomic<bool> g_edgeReloadPending;
+
+void ReloadIfEdgeChanged() {
+    UINT edge = macdock::GetTaskbarEdge();
+    if (macdock::IsVerticalEdge(edge) ==
+            macdock::IsVerticalEdge(macdock::g_cachedEdge) ||
+        g_unloading || g_edgeReloadPending.exchange(true)) {
+        return;
+    }
+    HANDLE t = CreateThread(
+        nullptr, 0,
+        [](LPVOID) -> DWORD {
+            Sleep(300);
+            ReloadDock(true);
+            g_edgeReloadPending = false;
+            return 0;
+        },
+        nullptr, 0, nullptr);
+    if (t) {
+        CloseHandle(t);
+    } else {
+        g_edgeReloadPending = false;
+    }
+}
+
 void WINAPI TaskbarController_UpdateFrameHeight_Hook(void* pThis) {
     Wh_Log(L">");
+
+    ReloadIfEdgeChanged();
 
     if (IsVerticalTaskbar()) {
         TaskbarController_UpdateFrameHeight_Original(pThis);
@@ -14289,6 +14319,9 @@ void StopThemeWatch() {
     g_themeWatchStopEvent = nullptr;
 }
 
+HANDLE g_edgeCheckThread;
+HANDLE g_edgeCheckStop;
+
 BOOL Wh_ModInit() {
     Wh_Log(L">");
 
@@ -14377,6 +14410,21 @@ void Wh_ModAfterInit() {
     }
 
     StartThemeWatch();
+
+    // Check again once the taskbar has settled after an Explorer restart.
+    g_edgeCheckStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_edgeCheckThread = CreateThread(
+        nullptr, 0,
+        [](LPVOID) -> DWORD {
+            for (int i = 0; i < 4; i++) {
+                if (WaitForSingleObject(g_edgeCheckStop, 1500) != WAIT_TIMEOUT) {
+                    break;
+                }
+                taskbarheight::ReloadIfEdgeChanged();
+            }
+            return 0;
+        },
+        nullptr, 0, nullptr);
 }
 
 void Wh_ModBeforeUninit() {
@@ -14389,6 +14437,15 @@ void Wh_ModUninit() {
     Wh_Log(L">");
 
     DockUiStop();
+
+    if (g_edgeCheckThread) {
+        SetEvent(g_edgeCheckStop);
+        WaitForSingleObject(g_edgeCheckThread, INFINITE);
+        CloseHandle(g_edgeCheckThread);
+        CloseHandle(g_edgeCheckStop);
+        g_edgeCheckThread = nullptr;
+        g_edgeCheckStop = nullptr;
+    }
 
     StopThemeWatch();
 
