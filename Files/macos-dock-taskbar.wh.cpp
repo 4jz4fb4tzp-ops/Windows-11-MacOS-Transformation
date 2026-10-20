@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0
+// @version         2.0.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -11996,6 +11996,33 @@ using TaskbarResources_OnTaskListButtonContextRequested_t = void(WINAPI*)(
 TaskbarResources_OnTaskListButtonContextRequested_t
     TaskbarResources_OnTaskListButtonContextRequested_Original;
 
+// Temporary trace to find a crash: appends to MacOs-Dock\dock-debug.txt.
+void DockTrace(const wchar_t* step) {
+    static std::wstring path = [] {
+        std::wstring folder = macdock::GetStrFor(false, L"iconFolder");
+        WCHAR expanded[MAX_PATH * 2];
+        DWORD len = ExpandEnvironmentStringsW(folder.c_str(), expanded,
+                                              ARRAYSIZE(expanded));
+        if (len > 0 && len <= ARRAYSIZE(expanded)) folder = expanded;
+        while (!folder.empty() &&
+               (folder.back() == L'\\' || folder.back() == L'/')) {
+            folder.pop_back();
+        }
+        size_t slash = folder.find_last_of(L"\\/");
+        return slash == std::wstring::npos
+                   ? std::wstring()
+                   : folder.substr(0, slash) + L"\\dock-debug.txt";
+    }();
+    if (path.empty()) return;
+    FILE* f = _wfopen(path.c_str(), L"a, ccs=UTF-8");
+    if (!f) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fwprintf(f, L"%02d:%02d:%02d.%03d %ls\n", st.wHour, st.wMinute, st.wSecond,
+             st.wMilliseconds, step);
+    fclose(f);
+}
+
 std::atomic<bool> g_dockMenuOpen;
 bool g_dockMenuPassThrough;  // taskbar thread only
 winrt::weak_ref<Controls::MenuFlyout> g_dockMenu;
@@ -12081,9 +12108,13 @@ Controls::MenuFlyoutItem MakeDockMenuItem(const wchar_t* text,
 }
 
 bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
+    DockTrace((L"TryShowDockMenu route " + std::to_wstring(request.route) +
+               (element ? L" element" : L" no element"))
+                  .c_str());
     if (g_unloading || g_dockMenuPassThrough || !element) {
         return false;
     }
+    DockTrace((L"class " + std::wstring(winrt::get_class_name(element))).c_str());
     if (winrt::get_class_name(element) != L"Taskbar.TaskListButton" ||
         IsSeparatorButton(element)) {
         return false;
@@ -12091,17 +12122,20 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
     // Several routes can report the same right-click; only the first one
     // opens the menu, the others are just swallowed.
     if (g_dockMenuOpen.exchange(true)) {
+        DockTrace(L"already open");
         return true;
     }
 
     try {
         bool de = UseGermanUi();
         std::wstring appId = GetButtonAppId(element);
+        DockTrace((L"appId " + appId).c_str());
         std::wstring appName(
             Automation::AutomationProperties::GetName(element).c_str());
 
         Controls::MenuFlyout menu;
         UINT edge = macdock::GetTaskbarEdge();
+        DockTrace(L"menu created");
         menu.Placement(edge == ABE_LEFT    ? Controls::Primitives::FlyoutPlacementMode::Right
                        : edge == ABE_RIGHT ? Controls::Primitives::FlyoutPlacementMode::Left
                                            : Controls::Primitives::FlyoutPlacementMode::Top);
@@ -12114,6 +12148,7 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
         });
         menu.Items().Append(jump);
 
+        DockTrace(L"jump item added");
         if (!appId.empty()) {
             menu.Items().Append(Controls::MenuFlyoutSeparator());
             auto change = MakeDockMenuItem(de ? L"Icon ändern …" : L"Change icon …",
@@ -12123,6 +12158,7 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
                 DockUiChangeIcon(appId, appName);
             });
             menu.Items().Append(change);
+            DockTrace(L"change item added");
             if (HasCustomIcon(appId)) {
                 auto original = MakeDockMenuItem(
                     de ? L"Windows-Icon verwenden" : L"Use Windows icon", L"\uE7A7");
@@ -12153,12 +12189,16 @@ bool TryShowDockMenu(FrameworkElement const& element, DockMenuRequest request) {
 
         menu.Closed([](auto&&, auto&&) { g_dockMenuOpen = false; });
         g_dockMenu = winrt::make_weak(menu);
+        DockTrace(L"ShowAt");
         menu.ShowAt(element);
+        DockTrace(L"shown");
         request.args.Handled(true);
+        DockTrace(L"handled");
     } catch (...) {
         g_dockMenuOpen = false;
         HRESULT hr = winrt::to_hresult();
         Wh_Log(L"Error %08X", hr);
+        DockTrace((L"exception " + std::to_wstring((unsigned)hr)).c_str());
         return false;
     }
     return true;
@@ -12168,11 +12208,9 @@ void WINAPI TaskListButton_OnContextRequested_Hook(
     void* pThis,
     UIElement const& sender,
     Input::ContextRequestedEventArgs const& args) {
-    FrameworkElement element = nullptr;
-    ((IUnknown*)pThis + 3)
-        ->QueryInterface(winrt::guid_of<FrameworkElement>(),
-                         winrt::put_abi(element));
-    if (!element) element = sender.try_as<FrameworkElement>();
+    DockTrace(L"hook route 0");
+    FrameworkElement element = sender.try_as<FrameworkElement>();
+    DockTrace(element ? L"route 0 sender ok" : L"route 0 no sender");
     if (TryShowDockMenu(element, {0, pThis, sender, args})) return;
     TaskListButton_OnContextRequested_Original(pThis, sender, args);
 }
@@ -12180,6 +12218,7 @@ void WINAPI TaskListButton_OnContextRequested_Hook(
 void WINAPI TaskListButtonHandlers_HandleContextRequested_Hook(
     UIElement const& sender,
     Input::ContextRequestedEventArgs const& args) {
+    DockTrace(L"hook route 1");
     if (TryShowDockMenu(sender.try_as<FrameworkElement>(),
                         {1, nullptr, sender, args})) {
         return;
@@ -12191,6 +12230,7 @@ void WINAPI TaskbarResources_OnTaskListButtonContextRequested_Hook(
     void* pThis,
     UIElement const& sender,
     Input::ContextRequestedEventArgs const& args) {
+    DockTrace(L"hook route 2");
     if (TryShowDockMenu(sender.try_as<FrameworkElement>(),
                         {2, pThis, sender, args})) {
         return;
