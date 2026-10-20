@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.2
+// @version         2.0.3
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -11998,33 +11998,6 @@ using TaskbarResources_OnTaskListButtonContextRequested_t = void(WINAPI*)(
 TaskbarResources_OnTaskListButtonContextRequested_t
     TaskbarResources_OnTaskListButtonContextRequested_Original;
 
-// Temporary trace to find a crash: appends to MacOs-Dock\dock-debug.txt.
-void DockTrace(const wchar_t* step) {
-    static std::wstring path = [] {
-        std::wstring folder = macdock::GetStrFor(false, L"iconFolder");
-        WCHAR expanded[MAX_PATH * 2];
-        DWORD len = ExpandEnvironmentStringsW(folder.c_str(), expanded,
-                                              ARRAYSIZE(expanded));
-        if (len > 0 && len <= ARRAYSIZE(expanded)) folder = expanded;
-        while (!folder.empty() &&
-               (folder.back() == L'\\' || folder.back() == L'/')) {
-            folder.pop_back();
-        }
-        size_t slash = folder.find_last_of(L"\\/");
-        return slash == std::wstring::npos
-                   ? std::wstring()
-                   : folder.substr(0, slash) + L"\\dock-debug.txt";
-    }();
-    if (path.empty()) return;
-    FILE* f = _wfopen(path.c_str(), L"a, ccs=UTF-8");
-    if (!f) return;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    fwprintf(f, L"%02d:%02d:%02d.%03d %ls\n", st.wHour, st.wMinute, st.wSecond,
-             st.wMilliseconds, step);
-    fclose(f);
-}
-
 std::atomic<bool> g_dockMenuOpen;
 winrt::weak_ref<Controls::MenuFlyout> g_dockMenu;
 
@@ -12103,11 +12076,9 @@ Controls::MenuFlyoutItem MakeDockMenuItem(const wchar_t* text,
 }
 
 bool TryShowDockMenu(FrameworkElement const& element) {
-    DockTrace(element ? L"TryShowDockMenu element" : L"TryShowDockMenu no element");
     if (g_unloading || !element) {
         return false;
     }
-    DockTrace((L"class " + std::wstring(winrt::get_class_name(element))).c_str());
     if (winrt::get_class_name(element) != L"Taskbar.TaskListButton" ||
         IsSeparatorButton(element)) {
         return false;
@@ -12115,11 +12086,9 @@ bool TryShowDockMenu(FrameworkElement const& element) {
     // Several routes can report the same right-click; only the first one
     // opens the menu, the others are just swallowed.
     if (g_dockMenuPassNext.exchange(false)) {
-        DockTrace(L"pass through to jump list");
         return false;
     }
     if (g_dockMenuOpen.exchange(true)) {
-        DockTrace(L"already open");
         return true;
     }
     GetCursorPos(&g_dockMenuPoint);
@@ -12127,13 +12096,11 @@ bool TryShowDockMenu(FrameworkElement const& element) {
     try {
         bool de = UseGermanUi();
         std::wstring appId = GetButtonAppId(element);
-        DockTrace((L"appId " + appId).c_str());
         std::wstring appName(
             Automation::AutomationProperties::GetName(element).c_str());
 
         Controls::MenuFlyout menu;
         UINT edge = macdock::GetTaskbarEdge();
-        DockTrace(L"menu created");
         menu.Placement(edge == ABE_LEFT    ? Controls::Primitives::FlyoutPlacementMode::Right
                        : edge == ABE_RIGHT ? Controls::Primitives::FlyoutPlacementMode::Left
                                            : Controls::Primitives::FlyoutPlacementMode::Top);
@@ -12146,7 +12113,6 @@ bool TryShowDockMenu(FrameworkElement const& element) {
         });
         menu.Items().Append(jump);
 
-        DockTrace(L"jump item added");
         if (!appId.empty()) {
             menu.Items().Append(Controls::MenuFlyoutSeparator());
             auto change = MakeDockMenuItem(de ? L"Icon ändern …" : L"Change icon …",
@@ -12156,7 +12122,6 @@ bool TryShowDockMenu(FrameworkElement const& element) {
                 DockUiChangeIcon(appId, appName);
             });
             menu.Items().Append(change);
-            DockTrace(L"change item added");
             if (HasCustomIcon(appId)) {
                 auto original = MakeDockMenuItem(
                     de ? L"Windows-Icon verwenden" : L"Use Windows icon", L"\uE7A7");
@@ -12187,14 +12152,11 @@ bool TryShowDockMenu(FrameworkElement const& element) {
 
         menu.Closed([](auto&&, auto&&) { g_dockMenuOpen = false; });
         g_dockMenu = winrt::make_weak(menu);
-        DockTrace(L"ShowAt");
         menu.ShowAt(element);
-        DockTrace(L"shown");
     } catch (...) {
         g_dockMenuOpen = false;
         HRESULT hr = winrt::to_hresult();
         Wh_Log(L"Error %08X", hr);
-        DockTrace((L"exception " + std::to_wstring((unsigned)hr)).c_str());
         return false;
     }
     return true;
@@ -12203,7 +12165,6 @@ bool TryShowDockMenu(FrameworkElement const& element) {
 void WINAPI TaskListButton_OnContextRequested_Hook(void* pThis,
                                                    UIElement const& sender,
                                                    void* args) {
-    DockTrace(L"hook route 0");
     if (TryShowDockMenu(sender.try_as<FrameworkElement>())) return;
     TaskListButton_OnContextRequested_Original(pThis, sender, args);
 }
@@ -12211,7 +12172,6 @@ void WINAPI TaskListButton_OnContextRequested_Hook(void* pThis,
 void WINAPI TaskListButtonHandlers_HandleContextRequested_Hook(
     UIElement const& sender,
     void* args) {
-    DockTrace(L"hook route 1");
     if (TryShowDockMenu(sender.try_as<FrameworkElement>())) return;
     TaskListButtonHandlers_HandleContextRequested_Original(sender, args);
 }
@@ -12220,7 +12180,6 @@ void WINAPI TaskbarResources_OnTaskListButtonContextRequested_Hook(
     void* pThis,
     UIElement const& sender,
     void* args) {
-    DockTrace(L"hook route 2");
     if (TryShowDockMenu(sender.try_as<FrameworkElement>())) return;
     TaskbarResources_OnTaskListButtonContextRequested_Original(pThis, sender,
                                                                args);
@@ -14662,9 +14621,9 @@ struct NavPage {
     const wchar_t* en;
 };
 const NavPage kPages[] = {
-    {L"", L"Allgemein", L"General"},  {L"", L"Dock", L"Dock"},
-    {L"", L"Aussehen", L"Appearance"}, {L"", L"Icons", L"Icons"},
-    {L"", L"Punkt", L"Indicator"},    {L"", L"Info", L"About"}};
+    {L"\uE713", L"Allgemein", L"General"},   {L"\uE771", L"Aussehen", L"Appearance"},
+    {L"\uE8B9", L"Icons", L"Icons"},         {L"\uE91F", L"Punkt", L"Indicator"},
+    {L"\uE9E9", L"Erweitert", L"Advanced"},  {L"\uE946", L"Info", L"About"}};
 constexpr int kPageCount = ARRAYSIZE(kPages);
 
 void AddRow(int page, RowType t, const wchar_t* de, const wchar_t* en,
@@ -14699,61 +14658,61 @@ void DefineRows() {
     AddRow(0, R_SECTION, L"Zurücksetzen", L"Reset");
     AddRow(0, R_BUTTON, L"Alle Werte dieser Position auf Standard",
            L"Reset all values of this position", nullptr, 0, 0, L"", ID_RESET);
-    // Dock
-    AddRow(1, R_SECTION, L"Dock", L"Dock");
-    AddRow(1, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
-    AddRow(1, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
-    AddRow(1, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
+    // Advanced (dock sizes and spacing)
+    AddRow(4, R_SECTION, L"Dock-Maße und Abstände", L"Dock sizes and spacing");
+    AddRow(4, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
+    AddRow(4, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
+    AddRow(4, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
            30, L"px");
-    AddRow(1, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
+    AddRow(4, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
            L"dockBottom", 0, 30, L"px");
-    AddRow(1, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
-    AddRow(1, R_SECTION, L"Taskleiste", L"Taskbar");
-    AddRow(1, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
+    AddRow(4, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
+    AddRow(4, R_SECTION, L"Taskleiste", L"Taskbar");
+    AddRow(4, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
            L"autoTaskbarHeight");
-    AddRow(1, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
+    AddRow(4, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
            L"Taskbar height (when not fitted)", L"taskbarHeight", 40, 100, L"px");
     // Appearance
-    AddRow(2, R_SECTION, L"Modus", L"Mode");
-    AddRow(2, R_COMBO, L"Hell oder dunkel", L"Light or dark", nullptr, 0, 0, L"",
+    AddRow(1, R_SECTION, L"Modus", L"Mode");
+    AddRow(1, R_COMBO, L"Hell oder dunkel", L"Light or dark", nullptr, 0, 0, L"",
            ID_APPEARANCE);
-    AddRow(2, R_SECTION, L"Hell", L"Light");
-    AddRow(2, R_COLOR, L"Tönung", L"Tint", L"tintColor");
-    AddRow(2, R_ALPHA, L"Deckkraft der Tönung", L"Tint opacity", L"tintColor", 0, 100, L"%");
-    AddRow(2, R_COLOR, L"Kante oben", L"Top edge", L"edgeColor");
-    AddRow(2, R_SECTION, L"Dunkel", L"Dark");
-    AddRow(2, R_COLOR, L"Tönung", L"Tint", L"darkTintColor");
-    AddRow(2, R_ALPHA, L"Deckkraft der Tönung", L"Tint opacity", L"darkTintColor", 0, 100,
+    AddRow(1, R_SECTION, L"Hell", L"Light");
+    AddRow(1, R_COLOR, L"Tönung", L"Tint", L"tintColor");
+    AddRow(1, R_ALPHA, L"Deckkraft der Tönung", L"Tint opacity", L"tintColor", 0, 100, L"%");
+    AddRow(1, R_COLOR, L"Kante oben", L"Top edge", L"edgeColor");
+    AddRow(1, R_SECTION, L"Dunkel", L"Dark");
+    AddRow(1, R_COLOR, L"Tönung", L"Tint", L"darkTintColor");
+    AddRow(1, R_ALPHA, L"Deckkraft der Tönung", L"Tint opacity", L"darkTintColor", 0, 100,
            L"%");
-    AddRow(2, R_COLOR, L"Kante oben", L"Top edge", L"darkEdgeColor");
+    AddRow(1, R_COLOR, L"Kante oben", L"Top edge", L"darkEdgeColor");
     // Icons
-    AddRow(3, R_SECTION, L"Größen", L"Sizes");
-    AddRow(3, R_SLIDER, L"Platz pro Icon", L"Space per icon", L"buttonWidth", 30, 80, L"px");
-    AddRow(3, R_SLIDER, L"Eigene Icons", L"Custom icons", L"iconSize", 20, 70, L"px");
-    AddRow(3, R_SLIDER, L"Windows-Icons (0 = Standard)", L"Windows icons (0 = default)",
+    AddRow(2, R_SECTION, L"Größen", L"Sizes");
+    AddRow(2, R_SLIDER, L"Platz pro Icon", L"Space per icon", L"buttonWidth", 30, 80, L"px");
+    AddRow(2, R_SLIDER, L"Eigene Icons", L"Custom icons", L"iconSize", 20, 70, L"px");
+    AddRow(2, R_SLIDER, L"Windows-Icons (0 = Standard)", L"Windows icons (0 = default)",
            L"nativeIconSize", 0, 64, L"px");
-    AddRow(3, R_SLIDER, L"Position (+ = näher am Rand)", L"Position (+ = closer to edge)",
+    AddRow(2, R_SLIDER, L"Position (+ = näher am Rand)", L"Position (+ = closer to edge)",
            L"iconOffsetY", -10, 10, L"px");
-    AddRow(3, R_SECTION, L"Eigene Icons", L"Custom icons");
-    AddRow(3, R_NOTE,
+    AddRow(2, R_SECTION, L"Eigene Icons", L"Custom icons");
+    AddRow(2, R_NOTE,
            L"Rechtsklick auf eine App im Dock → „Icon ändern …“ wählt ein PNG für genau diese "
            L"App. „Windows-Icon verwenden“ macht es rückgängig.",
            L"Right-click an app in the dock → \"Change icon …\" picks a PNG for that app. "
            L"\"Use Windows icon\" undoes it.");
-    AddRow(3, R_FOLDER, L"Icon-Ordner", L"Icon folder", nullptr, 0, 0, L"", ID_FOLDER);
-    AddRow(3, R_BUTTON, L"Per Rechtsklick gewählte Icons entfernen",
+    AddRow(2, R_FOLDER, L"Icon-Ordner", L"Icon folder", nullptr, 0, 0, L"", ID_FOLDER);
+    AddRow(2, R_BUTTON, L"Per Rechtsklick gewählte Icons entfernen",
            L"Remove icons chosen by right-click", nullptr, 0, 0, L"", ID_RESETICONS);
     // Indicator
-    AddRow(4, R_SECTION, L"Punkt", L"Dot");
-    AddRow(4, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
-    AddRow(4, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
+    AddRow(3, R_SECTION, L"Punkt", L"Dot");
+    AddRow(3, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
+    AddRow(3, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
            L"px");
-    AddRow(4, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
+    AddRow(3, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
            L"px");
-    AddRow(4, R_SECTION, L"Farben", L"Colors");
-    AddRow(4, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
-    AddRow(4, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
-    AddRow(4, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
+    AddRow(3, R_SECTION, L"Farben", L"Colors");
+    AddRow(3, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
+    AddRow(3, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
+    AddRow(3, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
            L"dotAttentionColor");
     // About
     AddRow(5, R_SECTION, L"macOS Dock", L"macOS Dock");
