@@ -512,6 +512,10 @@ void PaintContent(Gdiplus::Graphics& g, HDC dc, RECT rc) {
                    L"Windhawk is installed if needed. The installation needs admin rights, takes a few minutes "
                    L"and restarts Explorer at the end."),
                  {x0, S(410), x1, S(470)}, g_fontSmall, C.sub, DT_LEFT | DT_WORDBREAK);
+        DrawLabel(dc,
+                  T(L"Unabhängiges Fanprojekt, nicht mit Apple Inc. verbunden. macOS ist eine Marke von Apple Inc.",
+                    L"Independent fan project, not affiliated with Apple Inc. macOS is a trademark of Apple Inc."),
+                  {x0, S(450), x1, S(490)}, g_fontSmall, C.sub, DT_LEFT | DT_WORDBREAK);
     } else if (g_page == P_OPTIONS) {
         title(T(L"Optionen", L"Options"),
               T(L"Dock, Menüleiste und Animationen werden immer installiert. Dazu kannst du wählen:",

@@ -4,6 +4,8 @@ Turns Windows 11 into a macOS-style desktop with [Windhawk](https://windhawk.net
 a floating glass dock with macOS icons and dot indicators, a top menu bar, rounded window corners, genie minimize
 animations and macOS system icons.
 
+> Not affiliated with or endorsed by Apple Inc. macOS and Apple are trademarks of Apple Inc., registered in the U.S. and other countries. No Apple icons or other Apple files are included.
+
 <img width="3072" height="1920" alt="Screenshot 2026-10-09 173246" src="https://github.com/user-attachments/assets/43fc9d7d-18f7-4ce3-a2d3-27c20dfdbdfd" />
 
 ## Folder layout
@@ -215,6 +217,8 @@ with:
 ## License
 
 GPL-3.0, see [LICENSE](LICENSE).
+
+This is an independent fan project. It is not affiliated with, sponsored or endorsed by Apple Inc. macOS and Apple are trademarks of Apple Inc.
 
 ## Credits
 
