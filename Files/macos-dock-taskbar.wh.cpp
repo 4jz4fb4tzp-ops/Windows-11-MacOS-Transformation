@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.5
+// @version         2.0.6
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -12253,8 +12253,22 @@ void UpdateVerticalSeparator(void* pThis) {
     if (!element) return;
     std::wstring name(
         Automation::AutomationProperties::GetName(element).c_str());
-    if (name.find(L".8F31A7D2.") == std::wstring::npos) return;
     static double width = GetSeparatorModWidth();
+    if (name.find(L".8F31A7D2.") == std::wstring::npos) {
+        // The taskbar reuses button elements. A button that showed a separator
+        // before keeps its short height, so a newly opened app
+        // in it was cut off at the top and bottom. Undo that for real apps.
+        if (element.MaxHeight() == width) {
+            element.ClearValue(FrameworkElement::MaxHeightProperty());
+        }
+        if (auto iconPanel = FindChildByName(element, L"IconPanel")) {
+            if (iconPanel.MaxHeight() == width) {
+                iconPanel.ClearValue(FrameworkElement::MaxHeightProperty());
+                iconPanel.ClearValue(FrameworkElement::VerticalAlignmentProperty());
+            }
+        }
+        return;
+    }
     // The icon panel keeps the full button length; shrink it too and center
     // it, otherwise the line ends up outside the shorter button and vanishes.
     auto iconPanel = FindChildByName(element, L"IconPanel");
