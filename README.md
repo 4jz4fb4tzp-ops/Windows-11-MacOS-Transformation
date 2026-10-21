@@ -195,6 +195,7 @@ with:
   
 ## Changelog
 
+- **Fixed (macOS Dock 2.0.5):** the Windows icon of an opened app that isn't pinned was cut off at the top and bottom.
 - **New:** running `Setup.exe` again updates an existing installation and keeps all settings, icons, taskbar options and turned-off mods.
 - **New:** `Setup.exe`, a setup with a window: pick the optional mods and the icon pack, then watch the progress of every step. `Setup.cmd` still works.
 - **New:** Stage Manager mod (`stage-manager-taskbar-aware.wh.cpp`) and Top Menu Bar 0.32.0 with a Stage Manager tile in the Control Center.

@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.4
+// @version         2.0.5
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9629,15 +9629,33 @@ void ApplyDockSettings() {
              L"Taskbar.TaskListButton > Taskbar.TaskListLabeledButtonPanel#IconPanel",
              {Fmt(L"Width=%d", dockHeight - 2), L"HorizontalAlignment=Center",
               L"Margin=0", L"Padding=0"});
-        // The icon sits in a column sized for the Windows icon, which is
-        // narrower than the dock icons and cuts them off on the right. Let it
-        // span the whole button and center it.
-        Rule(L"Taskbar.TaskListButton > Grid#IconPanel > Image#Icon, "
-             L"Taskbar.TaskListButton > Taskbar.TaskListLabeledButtonPanel#IconPanel > Image#Icon",
-             {L"Grid.Column=0", L"Grid.ColumnSpan=10",
-              L"HorizontalAlignment=Center", L"VerticalAlignment=Center"});
     } else {
         Rule(L"Taskbar.TaskListButton", {Fmt(L"Width=%d", buttonWidth), L"Margin=0"});
+    }
+
+    // Windows icons (apps without a custom icon). Windows sizes the icon of a
+    // newly opened, unpinned app with its stock 24 px height while the bitmap
+    // already has the bigger dock size, so it was cut off at the top and
+    // bottom. Give every Windows icon the configured size and let it scale.
+    // The custom icon rules below come later and win for their apps.
+    {
+        int nativeIconSize = GetPx(L"nativeIconSize");
+        if (nativeIconSize <= 0) nativeIconSize = 24;
+        std::vector<std::wstring> nativeIconStyles{
+            Fmt(L"Width=%d", nativeIconSize), Fmt(L"Height=%d", nativeIconSize),
+            L"Stretch=Uniform"};
+        if (vertical) {
+            // The icon sits in a column sized for the Windows icon, which is
+            // narrower than the dock icons and cuts them off on the right.
+            // Let it span the whole button and center it.
+            for (PCWSTR st : {L"Grid.Column=0", L"Grid.ColumnSpan=10",
+                              L"HorizontalAlignment=Center", L"VerticalAlignment=Center"}) {
+                nativeIconStyles.push_back(st);
+            }
+        }
+        Rule(L"Taskbar.TaskListButton > Grid#IconPanel > Image#Icon, "
+             L"Taskbar.TaskListButton > Taskbar.TaskListLabeledButtonPanel#IconPanel > Image#Icon",
+             nativeIconStyles);
     }
 
     if (hideTray) {
