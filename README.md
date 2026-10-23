@@ -195,6 +195,7 @@ with:
   
 ## Changelog
 
+- **New (macOS Dock 2.1):** icon sets. Switch between **macOS** (your chosen icons), **Windows** (original icons) and your own sets, e.g. "Minecraft", with right-click → **Icon set** or in the settings window under **Icon sets**. Every set keeps its own icons and icon folder (new sets get `Documents\MacOs-Dock\Icon-Sets\<name>`).
 - **Fixed (macOS Dock 2.0.7):** after moving the dock back to the bottom, opened apps that aren't pinned could keep a turned icon.
 - **Fixed (macOS Dock 2.0.6):** with the dock on the left or right, an opened app that isn't pinned could be cut off at the top and bottom (it reused the short button of the separator).
 - **New:** running `Setup.exe` again updates an existing installation and keeps all settings, icons, taskbar options and turned-off mods.

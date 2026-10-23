@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.7
+// @version         2.1.0
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9171,6 +9171,114 @@ bool SideDefault(const std::wstring& key, int* value) {
 
 constexpr int kNoValue = std::numeric_limits<int>::min();
 
+// ---------------------------------------------------------------------------
+// Icon sets. Each set keeps its own icons chosen by right-click and its own
+// icon folder:
+//   "macos"   the original icons (keys g.icons / g.iconFolder, as before)
+//   "windows" no custom icons at all, every app shows its Windows icon
+//   "c<N>"    sets the user added, listed in g.iconSets as "<id>\t<name>"
+//             lines, with the keys g.icons.<id> / g.iconFolder.<id>
+// g.iconSet holds the active set.
+// ---------------------------------------------------------------------------
+struct IconSet {
+    std::wstring id, name;
+};
+
+std::wstring ReadValue(PCWSTR name) {
+    std::vector<WCHAR> buf(64 * 1024);
+    size_t len = Wh_GetStringValue(name, buf.data(), buf.size());
+    return std::wstring(buf.data(), len);
+}
+
+std::vector<IconSet> GetCustomIconSets() {
+    std::vector<IconSet> sets;
+    std::wstring all = ReadValue(L"g.iconSets");
+    size_t start = 0;
+    while (start < all.size()) {
+        size_t end = all.find(L'\n', start);
+        if (end == std::wstring::npos) end = all.size();
+        std::wstring line = all.substr(start, end - start);
+        size_t tab = line.find(L'\t');
+        if (tab != std::wstring::npos && tab > 0) {
+            sets.push_back({line.substr(0, tab), line.substr(tab + 1)});
+        }
+        start = end + 1;
+    }
+    return sets;
+}
+
+void SaveCustomIconSets(const std::vector<IconSet>& sets) {
+    std::wstring all;
+    for (auto& s : sets) all += s.id + L"\t" + s.name + L"\n";
+    Wh_SetStringValue(L"g.iconSets", all.c_str());
+}
+
+std::vector<IconSet> GetIconSets() {
+    std::vector<IconSet> sets{{L"macos", L"macOS"}, {L"windows", L"Windows"}};
+    for (auto& s : GetCustomIconSets()) sets.push_back(s);
+    return sets;
+}
+
+std::wstring ActiveIconSet() {
+    std::wstring id = ReadValue(L"g.iconSet");
+    if (id == L"windows") return id;
+    for (auto& s : GetCustomIconSets()) {
+        if (s.id == id) return id;
+    }
+    return L"macos";
+}
+
+void SetActiveIconSet(const std::wstring& id) {
+    Wh_SetStringValue(L"g.iconSet", id.c_str());
+}
+
+std::wstring IconsKey(const std::wstring& set) {
+    return set == L"macos" ? L"g.icons" : L"g.icons." + set;
+}
+
+std::wstring FolderKey(const std::wstring& set) {
+    return set == L"macos" ? L"g.iconFolder" : L"g.iconFolder." + set;
+}
+
+// Adds a set and makes it the active one. Its folder starts as
+// Documents\MacOs-Dock\Icon-Sets\<name>, which is created.
+std::wstring AddIconSet(const std::wstring& name) {
+    auto sets = GetCustomIconSets();
+    int next = Wh_GetIntValue(L"g.iconSetNext", 1);
+    std::wstring id = L"c" + std::to_wstring(next);
+    Wh_SetIntValue(L"g.iconSetNext", next + 1);
+    sets.push_back({id, name});
+    SaveCustomIconSets(sets);
+
+    std::wstring safe;
+    for (wchar_t c : name) safe += wcschr(L"\\/:*?\"<>|", c) ? L'_' : c;
+    std::wstring folder = L"%USERPROFILE%\\Documents\\MacOs-Dock\\Icon-Sets\\" + safe;
+    WCHAR expanded[MAX_PATH * 2];
+    if (ExpandEnvironmentStringsW(folder.c_str(), expanded, ARRAYSIZE(expanded))) {
+        SHCreateDirectoryExW(nullptr, expanded, nullptr);
+    }
+    Wh_SetStringValue(FolderKey(id).c_str(), folder.c_str());
+    SetActiveIconSet(id);
+    return id;
+}
+
+void RenameIconSet(const std::wstring& id, const std::wstring& name) {
+    auto sets = GetCustomIconSets();
+    for (auto& s : sets) {
+        if (s.id == id) s.name = name;
+    }
+    SaveCustomIconSets(sets);
+}
+
+void DeleteIconSet(const std::wstring& id) {
+    auto sets = GetCustomIconSets();
+    std::erase_if(sets, [&](auto& s) { return s.id == id; });
+    SaveCustomIconSets(sets);
+    Wh_DeleteValue(IconsKey(id).c_str());
+    Wh_DeleteValue(FolderKey(id).c_str());
+    if (ActiveIconSet() == L"macos") SetActiveIconSet(L"macos");
+}
+
 int GetIntFor(bool side, const std::wstring& key) {
     if (IsProfileIntKey(key)) {
         int v = Wh_GetIntValue(ProfileName(side, key).c_str(), kNoValue);
@@ -9182,9 +9290,9 @@ int GetIntFor(bool side, const std::wstring& key) {
 
 std::wstring GetStrFor(bool side, const std::wstring& key) {
     if (IsProfileStrKey(key) || key == L"iconFolder") {
-        // The icon folder is the same for both positions.
+        // The icon folder is the same for both positions, one per icon set.
         std::wstring name =
-            key == L"iconFolder" ? L"g.iconFolder" : ProfileName(side, key);
+            key == L"iconFolder" ? FolderKey(ActiveIconSet()) : ProfileName(side, key);
         WCHAR buf[1024];
         size_t len = Wh_GetStringValue(name.c_str(), buf, ARRAYSIZE(buf));
         if (len > 0) return std::wstring(buf);
@@ -9199,7 +9307,7 @@ void SetIntFor(bool side, const std::wstring& key, int value) {
 
 void SetStrFor(bool side, const std::wstring& key, const std::wstring& value) {
     std::wstring name =
-        key == L"iconFolder" ? L"g.iconFolder" : ProfileName(side, key);
+        key == L"iconFolder" ? FolderKey(ActiveIconSet()) : ProfileName(side, key);
     Wh_SetStringValue(name.c_str(), value.c_str());
 }
 
@@ -9221,16 +9329,14 @@ int GetInt(const std::wstring& key) {
     return GetIntFor(CurrentIsSide(), key);
 }
 
-// Custom icons chosen with the right-click menu: one line per App ID,
-// "<App ID>\t<PNG file>". The file "-" means "keep the Windows icon".
+// Custom icons chosen with the right-click menu, for the active icon set:
+// one line per App ID, "<App ID>\t<PNG file>". The file "-" means "keep the
+// Windows icon". The "windows" set has none.
 std::vector<std::pair<std::wstring, std::wstring>> GetIconMap() {
     std::vector<std::pair<std::wstring, std::wstring>> result;
-    std::wstring all;
-    {
-        std::vector<WCHAR> buf(64 * 1024);
-        size_t len = Wh_GetStringValue(L"g.icons", buf.data(), buf.size());
-        all.assign(buf.data(), len);
-    }
+    std::wstring set = ActiveIconSet();
+    if (set == L"windows") return result;
+    std::wstring all = ReadValue(IconsKey(set).c_str());
     size_t start = 0;
     while (start < all.size()) {
         size_t end = all.find(L'\n', start);
@@ -9246,12 +9352,14 @@ std::vector<std::pair<std::wstring, std::wstring>> GetIconMap() {
 }
 
 void SetIconFor(const std::wstring& appId, const std::wstring& file) {
+    std::wstring set = ActiveIconSet();
+    if (set == L"windows") return;
     auto map = GetIconMap();
     std::erase_if(map, [&](auto& e) { return _wcsicmp(e.first.c_str(), appId.c_str()) == 0; });
     if (!file.empty()) map.push_back({appId, file});
     std::wstring all;
     for (auto& e : map) all += e.first + L"\t" + e.second + L"\n";
-    Wh_SetStringValue(L"g.icons", all.c_str());
+    Wh_SetStringValue(IconsKey(set).c_str(), all.c_str());
 }
 
 // Takes over the profiles of the old PowerShell settings app once
@@ -9681,7 +9789,10 @@ void ApplyDockSettings() {
         std::wstring file;
     };
     std::vector<AppIcon> appIcons;
-    for (int i = 0; i < 200; i++) {
+    std::wstring iconSet = ActiveIconSet();
+    if (iconSet == L"windows") return;  // every app keeps its Windows icon
+    // The app list of the Windhawk settings belongs to the macOS icons.
+    for (int i = 0; iconSet == L"macos" && i < 200; i++) {
         std::wstring name = GetStr(Fmt(L"apps[%d].name", i));
         std::wstring ids = GetStr(Fmt(L"apps[%d].ids", i));
         std::wstring file = Trim(GetStr(Fmt(L"apps[%d].file", i)));
@@ -10250,6 +10361,7 @@ void ReloadDock(bool settingsChanged);
 
 // Dock settings window and icon picker (implemented at the end of the file).
 void DockUiShowSettings();
+void DockUiShowIconSets();
 void DockUiChangeIcon(const std::wstring& appId, const std::wstring& appName);
 void DockUiStop();
 
@@ -12094,6 +12206,7 @@ std::wstring GetButtonAppId(FrameworkElement const& element) {
 bool HasCustomIcon(const std::wstring& appId) {
     std::wstring file = macdock::GetIconFor(appId);
     if (!file.empty()) return file != L"-";
+    if (macdock::ActiveIconSet() != L"macos") return false;
     for (int i = 0; i < 200; i++) {
         std::wstring ids = macdock::GetStr(macdock::Fmt(L"apps[%d].ids", i));
         std::wstring f = macdock::GetStr(macdock::Fmt(L"apps[%d].file", i));
@@ -12161,7 +12274,8 @@ bool TryShowDockMenu(FrameworkElement const& element) {
         });
         menu.Items().Append(jump);
 
-        if (!appId.empty()) {
+        std::wstring activeSet = macdock::ActiveIconSet();
+        if (!appId.empty() && activeSet != L"windows") {
             menu.Items().Append(Controls::MenuFlyoutSeparator());
             auto change = MakeDockMenuItem(de ? L"Icon ändern …" : L"Change icon …",
                                            L"\uE8B9");
@@ -12188,6 +12302,51 @@ bool TryShowDockMenu(FrameworkElement const& element) {
                 menu.Items().Append(original);
             }
         }
+
+        // Icon set: macOS, Windows or one of the user's own sets.
+        if (appId.empty() || activeSet == L"windows") {
+            menu.Items().Append(Controls::MenuFlyoutSeparator());
+        }
+        Controls::MenuFlyoutSubItem setMenu;
+        setMenu.Text(de ? L"Icon-Set" : L"Icon set");
+        {
+            Controls::FontIcon icon;
+            icon.FontFamily(Media::FontFamily(L"Segoe Fluent Icons, Segoe MDL2 Assets"));
+            icon.Glyph(L"\uE91B");
+            icon.FontSize(16);
+            setMenu.Icon(icon);
+        }
+        for (auto& set : macdock::GetIconSets()) {
+            Controls::ToggleMenuFlyoutItem item;
+            item.Text(set.name);
+            item.IsChecked(set.id == activeSet);
+            std::wstring id = set.id;
+            item.Click([id](auto&&, auto&&) {
+                g_dockMenuOpen = false;
+                if (macdock::ActiveIconSet() == id) return;
+                macdock::SetActiveIconSet(id);
+                HANDLE t = CreateThread(
+                    nullptr, 0,
+                    [](LPVOID) -> DWORD {
+                        ReloadDock(true);
+                        return 0;
+                    },
+                    nullptr, 0, nullptr);
+                if (t) CloseHandle(t);
+            });
+            setMenu.Items().Append(item);
+        }
+        setMenu.Items().Append(Controls::MenuFlyoutSeparator());
+        {
+            Controls::MenuFlyoutItem add;
+            add.Text(de ? L"Icon-Sets verwalten …" : L"Manage icon sets …");
+            add.Click([](auto&&, auto&&) {
+                g_dockMenuOpen = false;
+                DockUiShowIconSets();
+            });
+            setMenu.Items().Append(add);
+        }
+        menu.Items().Append(setMenu);
 
         menu.Items().Append(Controls::MenuFlyoutSeparator());
         auto settings = MakeDockMenuItem(de ? L"Dock-Einstellungen …" : L"Dock settings …",
@@ -14682,7 +14841,8 @@ enum RowType {
     R_ALPHA,
     R_BUTTON,
     R_NOTE,
-    R_FOLDER
+    R_FOLDER,
+    R_SETNAME
 };
 
 enum {
@@ -14692,7 +14852,12 @@ enum {
     ID_RESET,
     ID_RESETICONS,
     ID_FOLDER,
-    ID_FOLDERBROWSE
+    ID_FOLDERBROWSE,
+    ID_ICONSET,
+    ID_SETNAME,
+    ID_SETADD,
+    ID_SETRENAME,
+    ID_SETDELETE
 };
 
 struct Row {
@@ -14726,8 +14891,10 @@ struct NavPage {
 };
 const NavPage kPages[] = {
     {L"\uE713", L"Allgemein", L"General"},   {L"\uE771", L"Aussehen", L"Appearance"},
-    {L"\uE8B9", L"Icons", L"Icons"},         {L"\uE91F", L"Punkt", L"Indicator"},
-    {L"\uE9E9", L"Erweitert", L"Advanced"},  {L"\uE946", L"Info", L"About"}};
+    {L"\uE8B9", L"Icons", L"Icons"},         {L"\uE8F1", L"Icon-Sets", L"Icon sets"},
+    {L"\uE91F", L"Punkt", L"Indicator"},     {L"\uE9E9", L"Erweitert", L"Advanced"},
+    {L"\uE946", L"Info", L"About"}};
+constexpr int kIconSetPage = 3;
 constexpr int kPageCount = ARRAYSIZE(kPages);
 
 void AddRow(int page, RowType t, const wchar_t* de, const wchar_t* en,
@@ -14763,18 +14930,18 @@ void DefineRows() {
     AddRow(0, R_BUTTON, L"Alle Werte dieser Position auf Standard",
            L"Reset all values of this position", nullptr, 0, 0, L"", ID_RESET);
     // Advanced (dock sizes and spacing)
-    AddRow(4, R_SECTION, L"Dock-Maße und Abstände", L"Dock sizes and spacing");
-    AddRow(4, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
-    AddRow(4, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
-    AddRow(4, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
+    AddRow(5, R_SECTION, L"Dock-Maße und Abstände", L"Dock sizes and spacing");
+    AddRow(5, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
+    AddRow(5, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
+    AddRow(5, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
            30, L"px");
-    AddRow(4, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
+    AddRow(5, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
            L"dockBottom", 0, 30, L"px");
-    AddRow(4, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
-    AddRow(4, R_SECTION, L"Taskleiste", L"Taskbar");
-    AddRow(4, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
+    AddRow(5, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
+    AddRow(5, R_SECTION, L"Taskleiste", L"Taskbar");
+    AddRow(5, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
            L"autoTaskbarHeight");
-    AddRow(4, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
+    AddRow(5, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
            L"Taskbar height (when not fitted)", L"taskbarHeight", 40, 100, L"px");
     // Appearance
     AddRow(1, R_SECTION, L"Modus", L"Mode");
@@ -14797,35 +14964,47 @@ void DefineRows() {
            L"nativeIconSize", 0, 64, L"px");
     AddRow(2, R_SLIDER, L"Position (+ = näher am Rand)", L"Position (+ = closer to edge)",
            L"iconOffsetY", -10, 10, L"px");
-    AddRow(2, R_SECTION, L"Eigene Icons", L"Custom icons");
-    AddRow(2, R_NOTE,
+    // Icon sets
+    AddRow(3, R_SECTION, L"Aktives Icon-Set", L"Active icon set");
+    AddRow(3, R_COMBO, L"Icons im Dock", L"Icons in the dock", nullptr, 0, 0, L"", ID_ICONSET);
+    AddRow(3, R_NOTE,
+           L"Jedes Set merkt sich seine eigenen Icons und seinen Ordner. „Windows“ zeigt die "
+           L"Original-Icons. Wechseln geht auch per Rechtsklick → „Icon-Set“.",
+           L"Each set keeps its own icons and folder. \"Windows\" shows the original icons. "
+           L"You can also switch with right-click → \"Icon set\".");
+    AddRow(3, R_SECTION, L"Eigene Icon-Sets", L"Your icon sets");
+    AddRow(3, R_SETNAME, L"Name", L"Name", nullptr, 0, 0, L"", ID_SETNAME);
+    AddRow(3, R_BUTTON, L"Aktives eigenes Set löschen", L"Delete the active own set", nullptr,
+           0, 0, L"", ID_SETDELETE);
+    AddRow(3, R_SECTION, L"Icons dieses Sets", L"Icons of this set");
+    AddRow(3, R_NOTE,
            L"Rechtsklick auf eine App im Dock → „Icon ändern …“ wählt ein PNG für genau diese "
-           L"App. „Windows-Icon verwenden“ macht es rückgängig.",
-           L"Right-click an app in the dock → \"Change icon …\" picks a PNG for that app. "
-           L"\"Use Windows icon\" undoes it.");
-    AddRow(2, R_FOLDER, L"Icon-Ordner", L"Icon folder", nullptr, 0, 0, L"", ID_FOLDER);
-    AddRow(2, R_BUTTON, L"Per Rechtsklick gewählte Icons entfernen",
-           L"Remove icons chosen by right-click", nullptr, 0, 0, L"", ID_RESETICONS);
+           L"App im aktiven Set. „Windows-Icon verwenden“ macht es rückgängig.",
+           L"Right-click an app in the dock → \"Change icon …\" picks a PNG for that app in "
+           L"the active set. \"Use Windows icon\" undoes it.");
+    AddRow(3, R_FOLDER, L"Icon-Ordner", L"Icon folder", nullptr, 0, 0, L"", ID_FOLDER);
+    AddRow(3, R_BUTTON, L"Gewählte Icons dieses Sets entfernen",
+           L"Remove the chosen icons of this set", nullptr, 0, 0, L"", ID_RESETICONS);
     // Indicator
-    AddRow(3, R_SECTION, L"Punkt", L"Dot");
-    AddRow(3, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
-    AddRow(3, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
+    AddRow(4, R_SECTION, L"Punkt", L"Dot");
+    AddRow(4, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
+    AddRow(4, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
            L"px");
-    AddRow(3, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
+    AddRow(4, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
            L"px");
-    AddRow(3, R_SECTION, L"Farben", L"Colors");
-    AddRow(3, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
-    AddRow(3, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
-    AddRow(3, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
+    AddRow(4, R_SECTION, L"Farben", L"Colors");
+    AddRow(4, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
+    AddRow(4, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
+    AddRow(4, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
            L"dotAttentionColor");
     // About
-    AddRow(5, R_SECTION, L"macOS Dock", L"macOS Dock");
-    AddRow(5, R_NOTE,
+    AddRow(6, R_SECTION, L"macOS Dock", L"macOS Dock");
+    AddRow(6, R_NOTE,
            L"Verwandelt die Windows-11-Taskleiste in ein macOS-Dock. Alle Änderungen werden "
            L"sofort übernommen und gespeichert.",
            L"Turns the Windows 11 taskbar into a macOS dock. All changes apply and save "
            L"immediately.");
-    AddRow(5, R_NOTE,
+    AddRow(6, R_NOTE,
            L"Dieses Fenster öffnest du mit einem Rechtsklick auf ein Icon im Dock → "
            L"„Dock-Einstellungen …“.",
            L"Open this window by right-clicking an icon in the dock → \"Dock settings …\".");
@@ -15020,6 +15199,8 @@ void BuildControls(HWND w) {
                                    T(L"Rechts", L"Right")}) {
                         SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)t);
                     }
+                } else if (r.id == ID_ICONSET) {
+                    // filled by SyncControls
                 } else {
                     for (auto t : {T(L"Wie Windows", L"Follow Windows"), T(L"Hell", L"Light"),
                                    T(L"Dunkel", L"Dark")}) {
@@ -15033,8 +15214,20 @@ void BuildControls(HWND w) {
                    {right - S(56), cy - S(14), right, cy + S(14)}, r.id);
                 break;
             case R_BUTTON:
-                mk(r.page, L"BUTTON", T(L"Zurücksetzen", L"Reset"), BS_PUSHBUTTON | WS_TABSTOP,
-                   {right - S(160), cy - S(16), right, cy + S(16)}, r.id);
+                mk(r.page, L"BUTTON",
+                   r.id == ID_SETDELETE ? T(L"Löschen", L"Delete")
+                   : r.id == ID_RESETICONS ? T(L"Entfernen", L"Remove")
+                                           : T(L"Zurücksetzen", L"Reset"),
+                   BS_PUSHBUTTON | WS_TABSTOP, {right - S(160), cy - S(16), right, cy + S(16)},
+                   r.id);
+                break;
+            case R_SETNAME:
+                mk(r.page, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER,
+                   {right - S(330), cy - S(14), right - S(214), cy + S(14)}, ID_SETNAME);
+                mk(r.page, L"BUTTON", T(L"Neues Set", L"New set"), BS_PUSHBUTTON | WS_TABSTOP,
+                   {right - S(206), cy - S(16), right - S(108), cy + S(16)}, ID_SETADD);
+                mk(r.page, L"BUTTON", T(L"Umbenennen", L"Rename"), BS_PUSHBUTTON | WS_TABSTOP,
+                   {right - S(100), cy - S(16), right, cy + S(16)}, ID_SETRENAME);
                 break;
             case R_FOLDER:
                 mk(r.page, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER,
@@ -15090,6 +15283,16 @@ void SyncControls(HWND w) {
                     UINT edge = macdock::GetTaskbarEdge();
                     SendMessageW(c, CB_SETCURSEL,
                                  edge == ABE_LEFT ? 0 : edge == ABE_RIGHT ? 2 : 1, 0);
+                } else if (r.id == ID_ICONSET) {
+                    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+                    std::wstring active = macdock::ActiveIconSet();
+                    int i = 0, sel = 0;
+                    for (auto& set : macdock::GetIconSets()) {
+                        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)set.name.c_str());
+                        if (set.id == active) sel = i;
+                        i++;
+                    }
+                    SendMessageW(c, CB_SETCURSEL, sel, 0);
                 } else {
                     std::wstring a = Str(L"appearance");
                     SendMessageW(c, CB_SETCURSEL, a == L"light" ? 1 : a == L"dark" ? 2 : 0, 0);
@@ -15101,6 +15304,16 @@ void SyncControls(HWND w) {
         }
     }
     SetDlgItemTextW(w, ID_FOLDER, Str(L"iconFolder").c_str());
+    {
+        std::wstring active = macdock::ActiveIconSet();
+        bool own = active != L"macos" && active != L"windows";
+        bool icons = active != L"windows";
+        EnableWindow(GetDlgItem(w, ID_SETRENAME), own);
+        EnableWindow(GetDlgItem(w, ID_SETDELETE), own);
+        EnableWindow(GetDlgItem(w, ID_FOLDER), icons);
+        EnableWindow(GetDlgItem(w, ID_FOLDERBROWSE), icons);
+        EnableWindow(GetDlgItem(w, ID_RESETICONS), icons);
+    }
     InvalidateRect(w, nullptr, FALSE);
     g_syncing = false;
 }
@@ -15176,7 +15389,9 @@ void Paint(HWND w, HDC hdc) {
                  g_font, g_uc.sub, DT_LEFT | DT_WORDBREAK);
             continue;
         }
-        int labelRight = r.type == R_FOLDER ? c.right - S(320) : c.right - S(280);
+        int labelRight = r.type == R_FOLDER    ? c.right - S(320)
+                         : r.type == R_SETNAME ? c.right - S(350)
+                                               : c.right - S(280);
         text(T(r.de, r.en), {c.left + S(16), c.top, labelRight, c.bottom}, g_font, g_uc.text,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         if (r.type == R_SLIDER || r.type == R_ALPHA) {
@@ -15492,10 +15707,62 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (id == ID_RESETICONS && code == BN_CLICKED) {
                 if (MessageBoxW(w,
-                                T(L"Alle per Rechtsklick gewählten Icons entfernen?",
-                                  L"Remove all icons chosen by right-click?"),
+                                T(L"Alle per Rechtsklick gewählten Icons dieses Icon-Sets entfernen?",
+                                  L"Remove all icons chosen by right-click in this icon set?"),
                                 T(L"Icons", L"Icons"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                    Wh_DeleteValue(L"g.icons");
+                    Wh_DeleteValue(macdock::IconsKey(macdock::ActiveIconSet()).c_str());
+                    Apply(w);
+                }
+                return 0;
+            }
+            if (id == ID_ICONSET && code == CBN_SELCHANGE) {
+                int sel = (int)SendMessageW((HWND)lp, CB_GETCURSEL, 0, 0);
+                auto sets = macdock::GetIconSets();
+                if (sel >= 0 && sel < (int)sets.size() &&
+                    sets[sel].id != macdock::ActiveIconSet()) {
+                    macdock::SetActiveIconSet(sets[sel].id);
+                    SyncControls(w);
+                    Apply(w);
+                }
+                return 0;
+            }
+            if ((id == ID_SETADD || id == ID_SETRENAME) && code == BN_CLICKED) {
+                WCHAR buf[128] = L"";
+                GetDlgItemTextW(w, ID_SETNAME, buf, ARRAYSIZE(buf));
+                std::wstring name = buf;
+                while (!name.empty() && iswspace(name.back())) name.pop_back();
+                while (!name.empty() && iswspace(name.front())) name.erase(0, 1);
+                for (auto& ch : name) {
+                    if (ch == L'\t' || ch == L'\n' || ch == L'\r') ch = L' ';
+                }
+                if (name.empty()) {
+                    MessageBoxW(w, T(L"Gib zuerst einen Namen ein, z. B. „Minecraft“.",
+                                     L"Enter a name first, for example \"Minecraft\"."),
+                                T(L"Icon-Sets", L"Icon sets"), MB_OK | MB_ICONINFORMATION);
+                    SetFocus(GetDlgItem(w, ID_SETNAME));
+                    return 0;
+                }
+                if (id == ID_SETADD) {
+                    macdock::AddIconSet(name);
+                    Apply(w);
+                } else {
+                    macdock::RenameIconSet(macdock::ActiveIconSet(), name);
+                }
+                SetDlgItemTextW(w, ID_SETNAME, L"");
+                SyncControls(w);
+                return 0;
+            }
+            if (id == ID_SETDELETE && code == BN_CLICKED) {
+                std::wstring active = macdock::ActiveIconSet();
+                if (active == L"macos" || active == L"windows") return 0;
+                if (MessageBoxW(w,
+                                T(L"Dieses Icon-Set löschen? Die PNG-Dateien im Ordner bleiben "
+                                  L"erhalten.",
+                                  L"Delete this icon set? The PNG files in its folder are kept."),
+                                T(L"Icon-Sets", L"Icon sets"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    macdock::DeleteIconSet(active);
+                    macdock::SetActiveIconSet(L"macos");
+                    SyncControls(w);
                     Apply(w);
                 }
                 return 0;
@@ -15615,6 +15882,10 @@ DWORD WINAPI ThreadProc(LPVOID) {
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (!msg.hwnd) {
             if (msg.message == WM_DOCKUI_SHOW) {
+                if (msg.wParam == 1) {
+                    g_page = kIconSetPage;
+                    if (g_wnd) SetPage(g_wnd, g_page);
+                }
                 ShowWindowNow();
             } else if (msg.message == WM_DOCKUI_ICON) {
                 auto* req = (IconRequest*)msg.lParam;
@@ -15675,6 +15946,12 @@ void StopThread() {
 void DockUiShowSettings() {
     if (dockui::EnsureThread()) {
         PostThreadMessageW(dockui::g_threadId, dockui::WM_DOCKUI_SHOW, 0, 0);
+    }
+}
+
+void DockUiShowIconSets() {
+    if (dockui::EnsureThread()) {
+        PostThreadMessageW(dockui::g_threadId, dockui::WM_DOCKUI_SHOW, 1, 0);
     }
 }
 
