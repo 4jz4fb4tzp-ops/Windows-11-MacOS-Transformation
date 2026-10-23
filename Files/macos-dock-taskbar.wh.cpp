@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.0.6
+// @version         2.0.7
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -12245,6 +12245,9 @@ int GetSeparatorModRotation() {
     return (int)value;
 }
 
+// Tiny CenterX that marks a rotation set by UpdateVerticalSeparator.
+constexpr double kSeparatorRotateMark = 0.0001;
+
 void UpdateVerticalSeparator(void* pThis) {
     FrameworkElement element = nullptr;
     ((IUnknown*)pThis + 3)
@@ -12265,6 +12268,16 @@ void UpdateVerticalSeparator(void* pThis) {
             if (iconPanel.MaxHeight() == width) {
                 iconPanel.ClearValue(FrameworkElement::MaxHeightProperty());
                 iconPanel.ClearValue(FrameworkElement::VerticalAlignmentProperty());
+            }
+            // Same for the turned separator line: the app icon would stay
+            // turned by 90°. Only the dock's own marked rotation is removed,
+            // not the one of custom separator icons.
+            if (FrameworkElement icon = FindChildByName(iconPanel, L"Icon")) {
+                if (auto rotate =
+                        icon.RenderTransform().try_as<Media::RotateTransform>();
+                    rotate && rotate.CenterX() == kSeparatorRotateMark) {
+                    icon.ClearValue(UIElement::RenderTransformProperty());
+                }
             }
         }
         return;
@@ -12301,6 +12314,8 @@ void UpdateVerticalSeparator(void* pThis) {
         if (turn) {
             Media::RotateTransform rotate;
             rotate.Angle(90);
+            // Marks the rotation as the dock's own, see below.
+            rotate.CenterX(kSeparatorRotateMark);
             icon.RenderTransformOrigin({0.5f, 0.5f});
             icon.RenderTransform(rotate);
         } else if (auto t = icon.RenderTransform();

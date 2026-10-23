@@ -195,6 +195,7 @@ with:
   
 ## Changelog
 
+- **Fixed (macOS Dock 2.0.7):** after moving the dock back to the bottom, opened apps that aren't pinned could keep a turned icon.
 - **Fixed (macOS Dock 2.0.6):** with the dock on the left or right, an opened app that isn't pinned could be cut off at the top and bottom (it reused the short button of the separator).
 - **New:** running `Setup.exe` again updates an existing installation and keeps all settings, icons, taskbar options and turned-off mods.
 - **New:** `Setup.exe`, a setup with a window: pick the optional mods and the icon pack, then watch the progress of every step. `Setup.cmd` still works.
