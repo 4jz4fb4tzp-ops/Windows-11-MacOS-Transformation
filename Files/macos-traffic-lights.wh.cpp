@@ -1,8 +1,8 @@
 // ==WindhawkMod==
 // @id              macos-traffic-lights-right
 // @name            macOS Traffic Lights
-// @description     macOS-Ampelknöpfe links in der Titelleiste, native Knöpfe rechts werden verdeckt – auch im Explorer
-// @version         2.0
+// @description     macOS traffic light buttons on the right of the title bar, replacing the native caption buttons – Explorer included
+// @version         2.1
 // @author          Okan
 // @include         *
 // @exclude         dwm.exe
@@ -19,37 +19,36 @@
 /*
 # macOS Traffic Lights
 
-- Rote/gelbe/grüne Knöpfe **links** in der Titelleiste (Schließen, Minimieren, Maximieren)
-- Die nativen Knöpfe rechts werden mit der Titelleistenfarbe überdeckt
-- Funktioniert auch bei Apps mit eigener Titelleiste (Explorer, Chrome, Edge, Store-Apps, Office …)
-- Symbole erscheinen beim Hovern, inaktive Fenster sind grau (abschaltbar)
-- Freie Fläche neben den Knöpfen: ziehen verschiebt das Fenster, Doppelklick maximiert
+- Green/yellow/red buttons (maximize, minimize, close) anchored to the **right** of the title bar
+- The native caption buttons are hidden behind a surface that copies the title bar's own colors
+- Also works with apps that draw their own title bar (Explorer, Chrome, Edge, Store apps, Office …)
+- Symbols appear on hover; inactive windows are shown gray (can be turned off)
+- Empty space next to the buttons behaves like the title bar: drag moves the window, double-click maximizes
 
-**Hinweis:** Die Knöpfe liegen über dem linken Rand der Titelleiste. Dort sitzende
-Inhalte (App-Symbol, Anfang des Titels, erster Tab in Explorer/Chrome) werden
-teilweise verdeckt. Sieht eine App schlecht aus: *Advanced → Custom process
-exclusion list* und die .exe eintragen.
+**Note:** If an app looks wrong, add its .exe under *Advanced → Custom process exclusion list*.
 */
 // ==/WindhawkModReadme==
 
 // ==WindhawkModSettings==
 /*
 - size: 12
-  $name: Knopfdurchmesser (px bei 100 %)
+  $name: Button diameter (px at 100 %)
 - spacing: 8
-  $name: Abstand zwischen den Knöpfen (px)
-- marginLeft: 12
-  $name: Abstand zum linken Fensterrand (px)
+  $name: Spacing between buttons (px)
+- marginRight: 12
+  $name: Distance from the right window edge (px)
 - inactiveGray: true
-  $name: Inaktive Fenster grau darstellen
+  $name: Show inactive windows gray
 - hideNative: true
-  $name: Native Knöpfe rechts verdecken
+  $name: Hide the native caption buttons
+  $description: When off, the traffic lights sit just left of the native buttons
 */
 // ==/WindhawkModSettings==
 
 #include <windhawk_utils.h>
 #include <dwmapi.h>
 #include <windowsx.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -59,34 +58,43 @@ exclusion list* und die .exe eintragen.
 
 enum { BTN_CLOSE = 0, BTN_MIN = 1, BTN_MAX = 2 };
 enum { TIMER_HOVER = 1, TIMER_POLL = 2, TIMER_SAMPLE = 3 };
-static const int kOrder[3] = {BTN_CLOSE, BTN_MIN, BTN_MAX};
+// Left to right: green (maximize), yellow (minimize), red (close).
+static const int kOrder[3] = {BTN_MAX, BTN_MIN, BTN_CLOSE};
 
 struct Settings {
     int size = 12;
     int spacing = 8;
-    int marginLeft = 12;
+    int marginRight = 12;
     bool inactiveGray = true;
     bool hideNative = true;
 } g_settings;
 
 struct Sig {
-    RECT cover, btns;
-    int hoverSlot, pressedSlot, size, spacing, marginLeft;
+    RECT ov;
+    float lightsX, lightsCy;
+    int hoverSlot, pressedSlot, size, spacing, marginRight;
     LONG style;
-    COLORREF bg;
+    unsigned bgVersion;
     bool active, hover, gray, hideNative, zoomed;
 };
 
 struct WinState {
     HWND hwnd = nullptr;
-    HWND cover = nullptr;  // right: hides native buttons, click-through
-    HWND btns = nullptr;   // left: traffic lights, interactive
-    RECT coverRect = {};
-    RECT btnRect = {};
+    HWND overlay = nullptr;  // traffic lights (+ native button cover), interactive
+    RECT ovRect = {};        // overlay, screen coords
+    RECT lightsRect = {};    // the three lights, screen coords
     RECT frame = {};
     float scale = 1;
-    COLORREF bg = 0;
-    bool bgValid = false;
+    float lightsX = 0;   // left edge of the first light, relative to the overlay
+    float lightsCy = 0;  // vertical center of the lights, relative to the overlay
+    std::vector<COLORREF> bgRows;  // title bar color per overlay row
+    unsigned bgVersion = 0;
+    // Where the window itself reports its caption buttons (see ProbeNativeButtons),
+    // in physical pixels: distance from the right window edge and from the frame
+    // top. 0 when the window reports none.
+    int nativeWidth = 0;
+    int nativeHeight = 0;
+    bool probing = false;
     bool fastTimer = false;
     bool inSizeMove = false;
     bool shown = false;
@@ -174,7 +182,7 @@ static bool ComputeGeometry(WinState* s) {
     float scale = dpi / 96.0f;
     if (fr.right - fr.left < 200 * scale || fr.bottom - fr.top < 60 * scale) return false;
 
-    // --- right: native caption buttons
+    // --- native caption buttons
     RECT out = {};
     bool ok = false;
     RECT b;
@@ -205,6 +213,13 @@ static bool ComputeGeometry(WinState* s) {
     } else {
         out = heur;
     }
+    // Buttons wider or taller than the estimate above would stick out of the
+    // cover and stay clickable, so the area the window reports is always covered.
+    if (s->nativeWidth > 0) {
+        int frameTop = zoomed ? top : fr.top;
+        out.left = std::min<LONG>(out.left, wr.right - s->nativeWidth);
+        out.bottom = std::max<LONG>(out.bottom, frameTop + s->nativeHeight);
+    }
     int captionH = out.bottom - out.top;
     int m = (int)(2 * scale + 0.5f);
     out.left -= m;
@@ -212,47 +227,199 @@ static bool ComputeGeometry(WinState* s) {
     if (out.right > fr.right) out.right = fr.right;
     if (out.top < top) out.top = top;
 
-    // --- left: traffic lights
+    // --- traffic lights, anchored to the right
     float d = g_settings.size * scale;
     float gap = g_settings.spacing * scale;
-    float ml = g_settings.marginLeft * scale;
-    int lw = (int)ceilf(2 * ml + 3 * d + 2 * gap);
+    float mr = g_settings.marginRight * scale;
+    int lw = (int)ceilf(2 * mr + 3 * d + 2 * gap);
+    RECT ov;
+    if (g_settings.hideNative) {
+        // One opaque, clickable surface over the whole native button area, so the hidden
+        // buttons can't be hovered or clicked through it.
+        ov = out;
+        if (ov.right - ov.left < lw) ov.left = ov.right - lw;
+    } else {
+        ov = {out.left - lw, out.top, out.left, out.top + captionH};
+    }
     int left = fr.left;
     if (left < mi.rcMonitor.left) left = mi.rcMonitor.left;
-    RECT lr = {left, out.top, left + lw, out.top + captionH};
-    if (lr.right >= out.left) return false;  // window too narrow
+    if (ov.left <= left + (int)(50 * scale)) return false;  // window too narrow
 
-    s->coverRect = out;
-    s->btnRect = lr;
+    s->ovRect = ov;
+    s->lightsX = (ov.right - ov.left) - lw + mr;
+    s->lightsCy = captionH / 2.0f;
+    float pad = gap / 2;
+    s->lightsRect = {ov.left + (int)floorf(s->lightsX - pad),
+                     ov.top + (int)floorf(s->lightsCy - d / 2 - pad),
+                     ov.left + (int)ceilf(s->lightsX + 3 * d + 2 * gap + pad),
+                     ov.top + (int)ceilf(s->lightsCy + d / 2 + pad)};
     s->frame = fr;
     s->scale = scale;
     return true;
 }
 
+static bool IsCaptionButtonHit(LRESULT ht) {
+    return ht == HTMINBUTTON || ht == HTMAXBUTTON || ht == HTCLOSE || ht == HTHELP;
+}
+
+// What the window answers for a screen point. Apps that draw their own title bar
+// still report their buttons here (Windows needs it for snap layouts), some from
+// a child window covering the title bar.
+static bool HitsCaptionButton(HWND h, int x, int y) {
+    LPARAM lp = MAKELPARAM((WORD)x, (WORD)y);
+    if (IsCaptionButtonHit(SendMessageW(h, WM_NCHITTEST, 0, lp))) return true;
+    HWND target = h;
+    for (int depth = 0; depth < 8; depth++) {
+        POINT c = {x, y};
+        ScreenToClient(target, &c);
+        HWND child = ChildWindowFromPointEx(target, c, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
+        if (!child || child == target) break;
+        target = child;
+    }
+    // Only children on this thread: a busy thread elsewhere would stall the probe.
+    return target != h && GetWindowThreadProcessId(target, nullptr) == GetCurrentThreadId() &&
+           IsCaptionButtonHit(SendMessageW(target, WM_NCHITTEST, 0, lp));
+}
+
+// Finds where the window's own caption buttons are by asking it, along a few
+// rows of the title bar from the right edge inwards. Runs in the window's own
+// DPI context, as an unaware app answers in its own coordinates, and the result
+// is scaled to physical pixels afterwards.
+static void ProbeNativeButtons(WinState* s) {
+    HWND h = s->hwnd;
+    if (!IsWindowVisible(h) || IsIconic(h)) return;
+    s->probing = true;
+    DPI_AWARENESS_CONTEXT old = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(h));
+
+    int width = 0, height = 0;
+    RECT wr;
+    if (GetWindowRect(h, &wr) && wr.right > wr.left) {
+        UINT dpi = GetDpiForWindow(h);
+        if (!dpi) dpi = 96;
+        float scale = dpi / 96.0f;
+        // Windows have no invisible border at the top, except when maximized.
+        int frameTop = wr.top;
+        if (IsZoomed(h))
+            frameTop += GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) +
+                        GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        int step = std::max(2, (int)(3 * scale));
+        int limit = (int)(400 * scale);
+        int left = INT_MAX, hitX = 0;
+        for (int row : {6, 14, 22}) {
+            int y = frameTop + (int)(row * scale);
+            int misses = 0;
+            bool found = false;
+            for (int x = wr.right - 1; x > wr.right - limit && x > wr.left; x -= step) {
+                if (HitsCaptionButton(h, x, y)) {
+                    found = true;
+                    misses = 0;
+                    if (x < left) {
+                        left = x;
+                        hitX = x + step;
+                    }
+                } else if (found && ++misses > 2) {
+                    break;  // past the leftmost button
+                }
+            }
+        }
+        if (left != INT_MAX) {
+            width = wr.right - left + step;
+            int bottom = frameTop;
+            for (int y = frameTop; y < frameTop + (int)(80 * scale); y += 2) {
+                if (HitsCaptionButton(h, hitX, y)) bottom = y + 2;
+            }
+            height = bottom - frameTop;
+        }
+    }
+    SetThreadDpiAwarenessContext(old);
+
+    // To physical pixels, by the ratio of the window's two sizes.
+    RECT pr;
+    {
+        DpiGuard g;
+        if (width && GetWindowRect(h, &pr) && wr.right > wr.left) {
+            float ratio = (float)(pr.right - pr.left) / (wr.right - wr.left);
+            width = (int)ceilf(width * ratio);
+            height = (int)ceilf(height * ratio);
+        }
+    }
+    s->nativeWidth = width;
+    s->nativeHeight = height;
+    s->probing = false;
+}
+
+// Copies the title bar strip just left of the overlay, one color per row. Several columns are
+// sampled and the per-channel median taken, so a stray glyph of the title text doesn't leak in.
 static void SampleBackground(WinState* s) {
+    // Same moments as the background sample: shown, resized, activated.
+    ProbeNativeButtons(s);
     DpiGuard g;
     if (!ComputeGeometry(s)) return;
-    POINT pt = {s->coverRect.left - 3, (s->coverRect.top + s->btnRect.bottom) / 2};
-    HWND under = WindowFromPoint(pt);
-    if (!under || GetAncestor(under, GA_ROOT) != s->hwnd) return;  // covered by another window
-    HDC dc = GetDC(nullptr);
-    COLORREF c = GetPixel(dc, pt.x, pt.y);
-    ReleaseDC(nullptr, dc);
-    if (c != CLR_INVALID) {
-        s->bg = c;
-        s->bgValid = true;
+    const RECT& ov = s->ovRect;
+    int h = ov.bottom - ov.top;
+    const int kCols = 5, kStep = 3;
+    int w = (kCols - 1) * kStep + 1;
+    int x0 = ov.left - 2 - (w - 1);
+
+    POINT probes[3] = {{x0, ov.top + h / 2}, {ov.left - 2, ov.top + 1}, {ov.left - 2, ov.bottom - 1}};
+    for (POINT pt : probes) {
+        HWND under = WindowFromPoint(pt);
+        if (!under || GetAncestor(under, GA_ROOT) != s->hwnd) return;  // covered by another window
     }
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp && bits) {
+        HGDIOBJ old = SelectObject(mem, bmp);
+        if (BitBlt(mem, 0, 0, w, h, screen, x0, ov.top, SRCCOPY)) {
+            GdiFlush();
+            const DWORD* px = (const DWORD*)bits;
+            std::vector<COLORREF> rows(h);
+            for (int y = 0; y < h; y++) {
+                int r[kCols], gr[kCols], bl[kCols];
+                for (int i = 0; i < kCols; i++) {
+                    DWORD p = px[y * w + i * kStep];
+                    r[i] = (p >> 16) & 0xFF;
+                    gr[i] = (p >> 8) & 0xFF;
+                    bl[i] = p & 0xFF;
+                }
+                std::sort(r, r + kCols);
+                std::sort(gr, gr + kCols);
+                std::sort(bl, bl + kCols);
+                rows[y] = RGB(r[kCols / 2], gr[kCols / 2], bl[kCols / 2]);
+            }
+            s->bgRows.swap(rows);
+            s->bgVersion++;
+        }
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+    }
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+}
+
+static COLORREF RowColor(WinState* s, int y) {
+    if (s->bgRows.empty()) return DefaultBg();
+    return s->bgRows[ClampInt(y, 0, (int)s->bgRows.size() - 1)];
 }
 
 static int HitSlot(WinState* s, int x, int y) {
     float d = g_settings.size * s->scale;
     float gap = g_settings.spacing * s->scale;
-    float ml = g_settings.marginLeft * s->scale;
-    int h = s->btnRect.bottom - s->btnRect.top;
-    float cy = h / 2.0f;
+    float cy = s->lightsCy;
     if (y < cy - d / 2 - gap / 2 || y > cy + d / 2 + gap / 2) return -1;
     for (int i = 0; i < 3; i++) {
-        float l = ml + i * (d + gap) - gap / 2;
+        float l = s->lightsX + i * (d + gap) - gap / 2;
         if (x >= l && x < l + d + gap) return i;
     }
     return -1;
@@ -302,10 +469,15 @@ static void DrawLine(Canvas& c, float ax, float ay, float bx, float by, float hw
         }
 }
 
-static void FillBg(Canvas& c, COLORREF bg) {
-    DWORD px = 0xFF000000u | ((DWORD)GetRValue(bg) << 16) | ((DWORD)GetGValue(bg) << 8) |
-               GetBValue(bg);
-    for (int i = 0; i < c.w * c.h; i++) c.px[i] = px;
+static void FillRows(Canvas& c, WinState* s) {
+    COLORREF fallback = s->bgRows.empty() ? DefaultBg() : 0;
+    for (int y = 0; y < c.h; y++) {
+        COLORREF bg = s->bgRows.empty() ? fallback : RowColor(s, y);
+        DWORD px = 0xFF000000u | ((DWORD)GetRValue(bg) << 16) | ((DWORD)GetGValue(bg) << 8) |
+                   GetBValue(bg);
+        DWORD* row = c.px + y * c.w;
+        for (int x = 0; x < c.w; x++) row[x] = px;
+    }
 }
 
 // Makes pixels outside a rounded corner (center ccx/ccy, radius R) transparent.
@@ -331,39 +503,27 @@ static int Luma(COLORREF c) {
     return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
 }
 
-static void DrawCover(Canvas& c, WinState* s, const Sig& sg) {
-    FillBg(c, sg.bg);
-    if (IsWin11() && !sg.zoomed && sg.cover.right >= s->frame.right - 1 &&
-        sg.cover.top <= s->frame.top + 1) {
-        float R = 8 * s->scale;
-        ClipCorner(c, (s->frame.right - sg.cover.left) - R, (s->frame.top - sg.cover.top) + R, R,
-                   true);
-    }
-}
-
-static void DrawButtons(Canvas& c, WinState* s, const Sig& sg) {
+static void DrawOverlay(Canvas& c, WinState* s, const Sig& sg) {
     static const COLORREF fill[3]   = {RGB(255, 95, 87), RGB(254, 188, 46), RGB(40, 200, 64)};
     static const COLORREF border[3] = {RGB(224, 68, 62), RGB(222, 161, 35), RGB(30, 170, 50)};
     static const COLORREF glyph[3]  = {RGB(77, 0, 0), RGB(153, 87, 0), RGB(0, 100, 0)};
 
-    FillBg(c, sg.bg);
-    if (IsWin11() && !sg.zoomed && sg.btns.left <= s->frame.left + 1 &&
-        sg.btns.top <= s->frame.top + 1) {
+    FillRows(c, s);
+    if (IsWin11() && !sg.zoomed && sg.ov.right >= s->frame.right - 1 &&
+        sg.ov.top <= s->frame.top + 1) {
         float R = 8 * s->scale;
-        ClipCorner(c, (s->frame.left - sg.btns.left) + R, (s->frame.top - sg.btns.top) + R, R,
-                   false);
+        ClipCorner(c, (s->frame.right - sg.ov.left) - R, (s->frame.top - sg.ov.top) + R, R, true);
     }
 
     float d = sg.size * s->scale;
     float gap = sg.spacing * s->scale;
-    float ml = sg.marginLeft * s->scale;
     float r = d / 2;
-    float cy = c.h / 2.0f;
-    bool lightBg = Luma(sg.bg) > 128;
+    float cy = sg.lightsCy;
+    bool lightBg = Luma(RowColor(s, (int)cy)) > 128;
 
     for (int i = 0; i < 3; i++) {
         int b = kOrder[i];
-        float cx = ml + i * (d + gap) + r;
+        float cx = sg.lightsX + i * (d + gap) + r;
         bool enabled = IsButtonEnabled(sg.style, b);
         if (!enabled || sg.gray) {
             FillCircle(c, cx, cy, r, lightBg ? RGB(205, 205, 205) : RGB(85, 85, 85), 1);
@@ -424,67 +584,63 @@ static void BlitLayered(HWND wnd, const RECT& r, F draw) {
 }
 
 static void HideAll(WinState* s) {
-    if (s->cover && IsWindowVisible(s->cover)) ShowWindow(s->cover, SW_HIDE);
-    if (s->btns && IsWindowVisible(s->btns)) ShowWindow(s->btns, SW_HIDE);
+    if (s->overlay && IsWindowVisible(s->overlay)) ShowWindow(s->overlay, SW_HIDE);
     s->shown = false;
 }
 
 static void Render(WinState* s, bool force = false) {
-    if (!s->cover || !s->btns) return;
+    if (!s->overlay) return;
     DpiGuard g;
 
     if (!ComputeGeometry(s)) {
         HideAll(s);
         if (s->fastTimer) {
-            KillTimer(s->cover, TIMER_HOVER);
+            KillTimer(s->overlay, TIMER_HOVER);
             s->fastTimer = false;
         }
         return;
     }
-    if (!s->bgValid) s->bg = DefaultBg();
 
     POINT pt;
     GetCursorPos(&pt);
-    bool hover = PtInRect(&s->btnRect, pt) != FALSE;
+    bool inOverlay = PtInRect(&s->ovRect, pt) != FALSE;
+    bool hover = PtInRect(&s->lightsRect, pt) != FALSE;
 
     Sig sg;
     memset(&sg, 0, sizeof(sg));
-    sg.cover = s->coverRect;
-    sg.btns = s->btnRect;
+    sg.ov = s->ovRect;
+    sg.lightsX = s->lightsX;
+    sg.lightsCy = s->lightsCy;
     sg.hover = hover;
-    sg.hoverSlot = hover ? HitSlot(s, pt.x - s->btnRect.left, pt.y - s->btnRect.top) : -1;
+    sg.hoverSlot = hover ? HitSlot(s, pt.x - s->ovRect.left, pt.y - s->ovRect.top) : -1;
     sg.pressedSlot = s->pressedSlot;
     sg.active = GetForegroundWindow() == s->hwnd;
     sg.gray = g_settings.inactiveGray && !sg.active && !hover;
     sg.style = GetWindowLongW(s->hwnd, GWL_STYLE) & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-    sg.bg = s->bg;
+    sg.bgVersion = s->bgVersion;
     sg.size = g_settings.size;
     sg.spacing = g_settings.spacing;
-    sg.marginLeft = g_settings.marginLeft;
+    sg.marginRight = g_settings.marginRight;
     sg.hideNative = g_settings.hideNative;
     sg.zoomed = IsZoomed(s->hwnd) != FALSE;
 
-    if (hover && !s->fastTimer) {
-        SetTimer(s->cover, TIMER_HOVER, 30, nullptr);
+    if (inOverlay && !s->fastTimer) {
+        SetTimer(s->overlay, TIMER_HOVER, 30, nullptr);
         s->fastTimer = true;
-    } else if (!hover && s->fastTimer && s->pressedSlot < 0) {
-        KillTimer(s->cover, TIMER_HOVER);
+    } else if (!inOverlay && s->fastTimer && s->pressedSlot < 0) {
+        KillTimer(s->overlay, TIMER_HOVER);
         s->fastTimer = false;
     }
 
     if (!force && s->shown && memcmp(&sg, &s->last, sizeof(sg)) == 0) return;
     s->last = sg;
 
-    if (sg.hideNative)
-        BlitLayered(s->cover, sg.cover, [&](Canvas& c) { DrawCover(c, s, sg); });
-    else if (IsWindowVisible(s->cover))
-        ShowWindow(s->cover, SW_HIDE);
-    BlitLayered(s->btns, sg.btns, [&](Canvas& c) { DrawButtons(c, s, sg); });
+    BlitLayered(s->overlay, sg.ov, [&](Canvas& c) { DrawOverlay(c, s, sg); });
     s->shown = true;
 }
 
 static void ScheduleSample(WinState* s, UINT ms) {
-    if (s->cover) SetTimer(s->cover, TIMER_SAMPLE, ms, nullptr);
+    if (s->overlay) SetTimer(s->overlay, TIMER_SAMPLE, ms, nullptr);
 }
 
 static void DoAction(WinState* s, int slot) {
@@ -496,24 +652,24 @@ static void DoAction(WinState* s, int slot) {
     PostMessageW(s->hwnd, WM_SYSCOMMAND, cmd, 0);
 }
 
-// ---------------------------------------------------------------- overlay windows
+// ---------------------------------------------------------------- overlay window
 
 static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     WinState* s = (WinState*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    bool isBtns = s && h == s->btns;
+    bool isOv = s && h == s->overlay;
     switch (m) {
         case WM_NCCREATE:
             SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)l)->lpCreateParams);
             break;
         case WM_NCHITTEST:
-            return isBtns ? HTCLIENT : HTTRANSPARENT;
+            return HTCLIENT;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         case WM_MOUSEMOVE:
-            if (isBtns) Render(s);
+            if (isOv) Render(s);
             return 0;
         case WM_LBUTTONDOWN:
-            if (isBtns) {
+            if (isOv) {
                 int slot = HitSlot(s, GET_X_LPARAM(l), GET_Y_LPARAM(l));
                 if (slot >= 0) {
                     s->pressedSlot = slot;
@@ -527,7 +683,7 @@ static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             return 0;
         case WM_LBUTTONUP:
-            if (isBtns && s->pressedSlot >= 0) {
+            if (isOv && s->pressedSlot >= 0) {
                 int slot = HitSlot(s, GET_X_LPARAM(l), GET_Y_LPARAM(l));
                 int p = s->pressedSlot;
                 s->pressedSlot = -1;
@@ -537,13 +693,13 @@ static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             return 0;
         case WM_LBUTTONDBLCLK:
-            if (isBtns && HitSlot(s, GET_X_LPARAM(l), GET_Y_LPARAM(l)) < 0 &&
+            if (isOv && HitSlot(s, GET_X_LPARAM(l), GET_Y_LPARAM(l)) < 0 &&
                 (GetWindowLongW(s->hwnd, GWL_STYLE) & WS_MAXIMIZEBOX))
                 PostMessageW(s->hwnd, WM_SYSCOMMAND, IsZoomed(s->hwnd) ? SC_RESTORE : SC_MAXIMIZE,
                              0);
             return 0;
         case WM_CAPTURECHANGED:
-            if (isBtns && s->pressedSlot >= 0) {
+            if (isOv && s->pressedSlot >= 0) {
                 s->pressedSlot = -1;
                 Render(s);
             }
@@ -559,12 +715,9 @@ static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             return 0;
         case WM_DESTROY:
-            if (s) {
-                if (s->cover == h) {
-                    s->cover = nullptr;
-                    s->fastTimer = false;
-                }
-                if (s->btns == h) s->btns = nullptr;
+            if (s && s->overlay == h) {
+                s->overlay = nullptr;
+                s->fastTimer = false;
                 s->shown = false;
             }
             SetWindowLongPtrW(h, GWLP_USERDATA, 0);
@@ -576,47 +729,42 @@ static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 // ---------------------------------------------------------------- attach / detach
 
 static void Detach(WinState* s) {
-    if (s->btns) DestroyWindow(s->btns);
-    if (s->cover) DestroyWindow(s->cover);
-    s->btns = s->cover = nullptr;
+    if (s->overlay) DestroyWindow(s->overlay);
+    s->overlay = nullptr;
 }
 
 static void Attach(WinState* s) {
-    if (s->cover || g_unloading || !IsWindowVisible(s->hwnd)) return;
+    if (s->overlay || g_unloading || !IsWindowVisible(s->hwnd)) return;
     {
-        DpiGuard g;  // overlays must be per-monitor aware to use physical pixels
-        s->cover = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            kOverlayClass, L"", WS_POPUP, 0, 0, 1, 1, s->hwnd, nullptr, g_hInst, s);
-        s->btns = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                                  kOverlayClass, L"", WS_POPUP, 0, 0, 1, 1, s->hwnd, nullptr,
-                                  g_hInst, s);
+        DpiGuard g;  // overlay must be per-monitor aware to use physical pixels
+        s->overlay = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                     kOverlayClass, L"", WS_POPUP, 0, 0, 1, 1, s->hwnd, nullptr,
+                                     g_hInst, s);
     }
-    if (!s->cover || !s->btns) {
-        Wh_Log(L"Overlay konnte nicht erstellt werden: %u", GetLastError());
-        Detach(s);
+    if (!s->overlay) {
+        Wh_Log(L"Failed to create overlay: %u", GetLastError());
         return;
     }
-    SetTimer(s->cover, TIMER_POLL, 1000, nullptr);
+    SetTimer(s->overlay, TIMER_POLL, 1000, nullptr);
     SampleBackground(s);
     Render(s, true);
 }
 
 static void OnCursorActivity(WinState* s) {
-    if (!s->btns || s->fastTimer) return;
+    if (!s->overlay || s->fastTimer) return;
     POINT pt;
     {
         DpiGuard g;
         GetCursorPos(&pt);
     }
-    if (PtInRect(&s->btnRect, pt)) Render(s);
+    if (PtInRect(&s->ovRect, pt)) Render(s);
 }
 
 static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, DWORD_PTR ref) {
     WinState* s = (WinState*)ref;
 
     if (m == g_msgAttach) {
-        if (s->cover) {
+        if (s->overlay) {
             SampleBackground(s);
             Render(s, true);
         } else {
@@ -633,7 +781,7 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
         case WM_WINDOWPOSCHANGED: {
             LRESULT r = DefSubclassProc(h, m, w, l);
             auto* wp = (WINDOWPOS*)l;
-            if (!s->cover) {
+            if (!s->overlay) {
                 Attach(s);
             } else {
                 Render(s);
@@ -655,7 +803,7 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
         case WM_NCACTIVATE:
         case WM_ACTIVATEAPP: {
             LRESULT r = DefSubclassProc(h, m, w, l);
-            if (s->cover) {
+            if (s->overlay) {
                 Render(s);
                 ScheduleSample(s, 300);  // active/inactive title colors differ
             }
@@ -667,19 +815,30 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
         case WM_DPICHANGED:
             ScheduleSample(s, 300);
             break;
-        case WM_NCHITTEST:
+        case WM_NCHITTEST: {
+            // The native buttons stop being buttons: no hover, no clicks and no
+            // snap layouts flyout, while the window keeps its styles, so minimize
+            // and maximize still work everywhere else (taskbar, Win+arrows).
+            // The probe still needs the real answer.
+            LRESULT r = DefSubclassProc(h, m, w, l);
+            if (!s->probing) {
+                OnCursorActivity(s);
+                if (g_settings.hideNative && s->overlay && IsCaptionButtonHit(r)) r = HTCAPTION;
+            }
+            return r;
+        }
         case WM_SETCURSOR:
         case WM_NCMOUSEMOVE:
         case WM_MOUSEMOVE:
-            OnCursorActivity(s);
+            // Not for the probe's own hit tests.
+            if (!s->probing) OnCursorActivity(s);
             break;
         case WM_NCDESTROY: {
             {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 g_windows.erase(h);
             }
-            if (s->btns && IsWindow(s->btns)) DestroyWindow(s->btns);
-            if (s->cover && IsWindow(s->cover)) DestroyWindow(s->cover);
+            if (s->overlay && IsWindow(s->overlay)) DestroyWindow(s->overlay);
             LRESULT r = DefSubclassProc(h, m, w, l);
             delete s;
             return r;
@@ -702,7 +861,7 @@ static void OnWindowCreated(HWND h) {
         g_windows[h] = s;
     }
     if (!WindhawkUtils::SetWindowSubclassFromAnyThread(h, WindowSubclassProc, (DWORD_PTR)s)) {
-        Wh_Log(L"Subclass fehlgeschlagen: %p", h);
+        Wh_Log(L"Subclassing failed: %p", h);
         std::lock_guard<std::mutex> lock(g_mutex);
         g_windows.erase(h);
         delete s;
@@ -738,7 +897,7 @@ static HWND WINAPI CreateWindowExA_Hook(DWORD ex, LPCSTR cls, LPCSTR name, DWORD
 static void LoadSettings() {
     g_settings.size = ClampInt(Wh_GetIntSetting(L"size"), 6, 30);
     g_settings.spacing = ClampInt(Wh_GetIntSetting(L"spacing"), 0, 30);
-    g_settings.marginLeft = ClampInt(Wh_GetIntSetting(L"marginLeft"), 0, 100);
+    g_settings.marginRight = ClampInt(Wh_GetIntSetting(L"marginRight"), 0, 100);
     g_settings.inactiveGray = Wh_GetIntSetting(L"inactiveGray") != 0;
     g_settings.hideNative = Wh_GetIntSetting(L"hideNative") != 0;
 }
