@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.2.2
+// @version         2.3.0
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9722,6 +9722,8 @@ void ApplyDockSettings() {
 
     if (tintColor.empty()) tintColor = darkMode ? L"#80202020" : L"#10FFFFFF";
     if (edgeColor.empty()) edgeColor = darkMode ? L"#50FFFFFF" : L"#90FFFFFF";
+    (void)edgeColor;     // drawn by dockfx::SetupGlass now
+    (void)cornerRadius;  // likewise
     if (dotActive.empty()) dotActive = L"#FFFFFFFF";
     if (dotInactive.empty()) dotInactive = L"#B0FFFFFF";
     if (dotAttention.empty()) dotAttention = L"#FFFF9F0A";
@@ -9749,16 +9751,12 @@ void ApplyDockSettings() {
     // content, so the glass background is only as wide as the icons.
     // The glass itself is a Border the dock adds to the RootGrid (see
     // dockfx::SetupDock), so it can grow while icons are magnified.
+    // Its rounded shape and white edge come from the compositor (see
+    // dockfx::SetupGlass), so they follow the magnification.
     Rule(L"Taskbar.TaskbarFrame#TaskbarFrame > Grid#RootGrid > Border#MacDockGlass",
          {Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
               blurAmount, tintColor.c_str()),
-          Fmt(L"CornerRadius=%d", cornerRadius), L"BorderThickness=1",
-          Fmt(L"BorderBrush:=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\">"
-              L"<GradientStop Color=\"%s\" Offset=\"0\" />"
-              L"<GradientStop Color=\"#15FFFFFF\" Offset=\"0.5\" />"
-              L"<GradientStop Color=\"#40FFFFFF\" Offset=\"1\" />"
-              L"</LinearGradientBrush>",
-              edgeColor.c_str())});
+          L"BorderThickness=0"});
     // Transparent rather than none, so clicks on the dock's ends still land.
     std::vector<std::wstring> rootStyles{L"Background=Transparent"};
     // Room after the last app for the Recycle Bin and its divider.
@@ -10126,6 +10124,16 @@ FrameworkElement DescendantByName(DependencyObject const& parent, PCWSTR name, i
 
 // ---- Docks ----
 
+// One icon (or the Recycle Bin) of the row being magnified.
+struct RowElement {
+    winrt::weak_ref<FrameworkElement> element;
+    winrt::weak_ref<FrameworkElement> dot;
+    bool trash = false;
+    float center = 0, pitch = 0;  // along the dock, in the repeater's coordinates
+    winrt::Windows::Foundation::Numerics::float2 pivot{};  // in the element
+    float dotCenter = 0;  // across the dock, in the button
+};
+
 struct Dock {
     winrt::weak_ref<FrameworkElement> frame;
     winrt::weak_ref<wxc::Grid> root;
@@ -10140,12 +10148,20 @@ struct Dock {
     UIElement::DragOver_revoker trashDragOver;
     UIElement::Drop_revoker trashDrop;
     int trashState = -2;
-    float growStart = -1, growEnd = -1;  // last applied glass growth
-    // While icons are magnified the glass is laid out once at its widest and
-    // clipped to the current size, so no frame needs a layout pass.
-    bool glassExpanded = false;
+    // The glass is laid out once, reaching `glassSpread` px past the RootGrid
+    // at each end, and clipped to the dock's current size by the compositor.
+    // Its white edge is drawn by the compositor too, so it follows the clip.
     float glassSpread = 0;
     wuc::CompositionRoundedRectangleGeometry glassClip{nullptr};
+    wuc::CompositionRoundedRectangleGeometry edgeShape{nullptr};
+    // "Pointer" (along the dock, repeater coordinates) and "Amount" (0-1).
+    // Expressions on every icon read them, so the compositor animates the
+    // magnification itself, at the screen's refresh rate.
+    wuc::CompositionPropertySet props{nullptr};
+    float amountTarget = 0;
+    std::vector<RowElement> row;
+    double rowSignature = -1;
+    FrameworkElement::SizeChanged_revoker rootSizeChanged;
 };
 
 [[clang::no_destroy]] std::optional<std::list<Dock>> g_docks{std::in_place};
@@ -10165,58 +10181,116 @@ Dock* FindDockByRoot(UIElement const& root) {
     return nullptr;
 }
 
-bool IsRowDock(Dock const& d);
+winrt::Windows::UI::Color ParseArgb(std::wstring const& text, winrt::Windows::UI::Color fallback) {
+    if (text.size() != 7 && text.size() != 9) return fallback;
+    if (text[0] != L'#') return fallback;
+    unsigned long v = wcstoul(text.c_str() + 1, nullptr, 16);
+    BYTE a = text.size() == 9 ? (BYTE)(v >> 24) : 255;
+    return {a, (BYTE)(v >> 16), (BYTE)(v >> 8), (BYTE)v};
+}
 
-void SetGlassMargin(Dock& d, wxc::Grid const& root, float extra) {
-    auto pad = root.Padding();
-    if (g_cfg.vertical) {
-        d.glass.Margin({-pad.Left, -pad.Top - extra, -pad.Right, -pad.Bottom - extra});
-    } else {
-        d.glass.Margin({-pad.Left - extra, -pad.Top, -pad.Right - extra, -pad.Bottom});
+std::wstring Num(float v) {
+    WCHAR b[32];
+    swprintf(b, 32, v < 0 ? L"(%.3f)" : L"%.3f", v);
+    return b;
+}
+
+// Puts the glass's clip and white edge in place. With `expressions` they
+// follow the magnification's total growth "T"; without, they sit still.
+void PlaceGlass(Dock& d, std::wstring const& total) {
+    auto root = d.root.get();
+    if (!root || !d.glassClip) return;
+    float w = (float)root.ActualWidth(), h = (float)root.ActualHeight(), m = d.glassSpread;
+    auto comp = d.props.Compositor();
+    for (int part = 0; part < 2; part++) {
+        auto& geo = part == 0 ? d.glassClip : d.edgeShape;
+        float inset = part == 0 ? 0.0f : 0.5f;
+        geo.StopAnimation(L"Offset");
+        geo.StopAnimation(L"Size");
+        if (total.empty()) {
+            if (g_cfg.vertical) {
+                geo.Offset({inset, m + inset});
+                geo.Size({w - 2 * inset, h - 2 * inset});
+            } else {
+                geo.Offset({m + inset, inset});
+                geo.Size({w - 2 * inset, h - 2 * inset});
+            }
+            continue;
+        }
+        std::wstring offset, size;
+        if (g_cfg.vertical) {
+            offset = L"Vector2(" + Num(inset) + L", " + Num(m + inset) + L" - 0.5 * (" + total + L"))";
+            size = L"Vector2(" + Num(w - 2 * inset) + L", " + Num(h - 2 * inset) + L" + (" + total + L"))";
+        } else {
+            offset = L"Vector2(" + Num(m + inset) + L" - 0.5 * (" + total + L"), " + Num(inset) + L")";
+            size = L"Vector2(" + Num(w - 2 * inset) + L" + (" + total + L"), " + Num(h - 2 * inset) + L")";
+        }
+        auto e1 = comp.CreateExpressionAnimation(offset);
+        e1.SetReferenceParameter(L"p", d.props);
+        geo.StartAnimation(L"Offset", e1);
+        auto e2 = comp.CreateExpressionAnimation(size);
+        e2.SetReferenceParameter(L"p", d.props);
+        geo.StartAnimation(L"Size", e2);
     }
 }
 
-// Grows the glass past the RootGrid by `start` px before the first icon and
-// `end` px after the last one (along the dock). Layout only changes when
-// magnification starts and ends; in between only a composition clip moves.
-void ApplyGlass(Dock& d, float start, float end) {
-    if (!d.glass) return;
-    auto root = d.root.get();
-    if (!root) return;
-    bool want = start > 0.25f || end > 0.25f || IsRowDock(d);
-    if (!want) {
-        if (d.glassExpanded || d.growStart != 0 || d.growEnd != 0) {
-            SetGlassMargin(d, root, 0);
-            wuxh::ElementCompositionPreview::GetElementVisual(d.glass).Clip(nullptr);
-            d.glassClip = nullptr;
-            d.glassExpanded = false;
-        }
-        d.growStart = d.growEnd = 0;
-        return;
-    }
-    if (!d.glassExpanded) {
-        d.glassSpread = MaxSpread() + 2;
-        SetGlassMargin(d, root, d.glassSpread);
-        auto visual = wuxh::ElementCompositionPreview::GetElementVisual(d.glass);
-        auto compositor = visual.Compositor();
-        d.glassClip = compositor.CreateRoundedRectangleGeometry();
-        float r = (float)macdock::GetPx(L"cornerRadius");
-        d.glassClip.CornerRadius({r, r});
-        visual.Clip(compositor.CreateGeometricClip(d.glassClip));
-        d.glassExpanded = true;
-        d.growStart = d.growEnd = -1;
-    }
-    if (std::fabs(start - d.growStart) < 0.1f && std::fabs(end - d.growEnd) < 0.1f) return;
-    d.growStart = start;
-    d.growEnd = end;
-    float w = (float)root.ActualWidth(), h = (float)root.ActualHeight(), m = d.glassSpread;
+void RebuildRow(Dock& d);
+
+// Lays the glass out at its widest once, and gives it its clip and edge.
+void SetupGlass(Dock& d, wxc::Grid const& root) {
+    d.glassSpread = g_cfg.magnify ? MaxSpread() + 2 : 0;
+    auto pad = root.Padding();
+    float m = d.glassSpread;
     if (g_cfg.vertical) {
-        d.glassClip.Offset({0, m - start});
-        d.glassClip.Size({w, h + start + end});
+        d.glass.Margin({-pad.Left, -pad.Top - m, -pad.Right, -pad.Bottom - m});
     } else {
-        d.glassClip.Offset({m - start, 0});
-        d.glassClip.Size({w + start + end, h});
+        d.glass.Margin({-pad.Left - m, -pad.Top, -pad.Right - m, -pad.Bottom});
     }
+
+    auto visual = wuxh::ElementCompositionPreview::GetElementVisual(d.glass);
+    auto comp = visual.Compositor();
+    d.props = comp.CreatePropertySet();
+    d.props.InsertScalar(L"Pointer", 0);
+    d.props.InsertScalar(L"Amount", 0);
+
+    float r = (float)macdock::GetPx(L"cornerRadius");
+    d.glassClip = comp.CreateRoundedRectangleGeometry();
+    d.glassClip.CornerRadius({r, r});
+    visual.Clip(comp.CreateGeometricClip(d.glassClip));
+
+    // The edge: bright at the top, as the dock's style had it.
+    bool dark = macdock::IsDarkAppearance();
+    std::wstring edgeText = macdock::GetStr(dark ? L"darkEdgeColor" : L"edgeColor");
+    auto edge = ParseArgb(edgeText, dark ? winrt::Windows::UI::Color{0x50, 255, 255, 255}
+                                         : winrt::Windows::UI::Color{0x90, 255, 255, 255});
+    auto gradient = comp.CreateLinearGradientBrush();
+    gradient.StartPoint({0, 0});
+    gradient.EndPoint({0, 1});
+    gradient.ColorStops().Append(comp.CreateColorGradientStop(0.0f, edge));
+    gradient.ColorStops().Append(
+        comp.CreateColorGradientStop(0.5f, winrt::Windows::UI::Color{0x15, 255, 255, 255}));
+    gradient.ColorStops().Append(
+        comp.CreateColorGradientStop(1.0f, winrt::Windows::UI::Color{0x40, 255, 255, 255}));
+    d.edgeShape = comp.CreateRoundedRectangleGeometry();
+    d.edgeShape.CornerRadius({std::max(0.0f, r - 0.5f), std::max(0.0f, r - 0.5f)});
+    auto shape = comp.CreateSpriteShape(d.edgeShape);
+    shape.StrokeBrush(gradient);
+    shape.StrokeThickness(1);
+    auto shapes = comp.CreateShapeVisual();
+    shapes.Shapes().Append(shape);
+    auto size = comp.CreateExpressionAnimation(L"host.Size");
+    size.SetReferenceParameter(L"host", visual);
+    shapes.StartAnimation(L"Size", size);
+    wuxh::ElementCompositionPreview::SetElementChildVisual(d.glass, shapes);
+
+    PlaceGlass(d, L"");
+    // Apps opening and closing change the dock's size and the icons' places.
+    d.rootSizeChanged = root.SizeChanged(winrt::auto_revoke, [](auto&& sender, auto&&) {
+        try {
+            if (auto dock = FindDockByRoot(sender.template as<UIElement>())) RebuildRow(*dock);
+        } catch (...) {
+        }
+    });
 }
 
 // ---- Recycle Bin ----
@@ -10864,8 +10938,8 @@ bool SetupDock(FrameworkElement const& frame) {
     wxc::Grid::SetRowSpan(glass, 100);
     wxc::Grid::SetColumnSpan(glass, 100);
     d.glass = glass;
-    ApplyGlass(d, 0, 0);
     root.Children().InsertAt(index, glass);
+    SetupGlass(d, root);
 
     // Maximized windows end right above the dock, as without magnification.
     g_keepShown = g_cfg.magnify && macdock::MagnifyHeadroom() > 0;
@@ -10876,6 +10950,7 @@ bool SetupDock(FrameworkElement const& frame) {
         uint32_t after = 0;
         if (root.Children().IndexOf(repeater, after)) AddTrash(d, root, after + 1);
     }
+    RebuildRow(d);
     Wh_Log(L"Dock effects set up (magnify=%d, trash=%d)", g_cfg.magnify, g_cfg.trash);
     return true;
 }
@@ -10932,211 +11007,16 @@ void NoteElement(FrameworkElement const& element) {
 }
 
 // ---- Magnification ----
+// Everything moves in the compositor: each icon's size and shift are
+// expressions of the dock's "Pointer" and "Amount" properties, so the UI
+// thread only reports where the pointer is. As on a Mac, an icon grows with a
+// cosine falloff around the pointer and the ones beside it move aside.
 
-struct Item {
-    winrt::weak_ref<FrameworkElement> element;  // null for the Recycle Bin
-    bool trash = false;
-    float center = 0, pitch = 0;  // along the dock, in the repeater's coordinates
-    winrt::Windows::Foundation::Numerics::float2 pivot{};  // in the element
-    winrt::weak_ref<FrameworkElement> dot;
-    float dotCenter = 0;  // across the dock, in the button
-    float scale = 1, shift = 0;
-    float size = -1;  // the button's size when measured
-};
-
-std::vector<Item> g_row;
-Dock* g_rowDock = nullptr;
-bool g_pointerOver = false;
-
-bool IsRowDock(Dock const& d) {
-    return g_pointerOver && g_rowDock == &d;
-}
 bool g_expanded = false;
-float g_pointer = 0;
-bool g_anchorStart = true;
-float g_maxGrowth = 0, g_lastGrowth = 0;
-
-winrt::event_token g_frameToken{};
-bool g_frameRunning = false;
-std::chrono::steady_clock::time_point g_lastFrame;
+Dock* g_hoverDock = nullptr;
+winrt::Windows::System::DispatcherQueueTimer g_collapseTimer{nullptr};
 
 void RefreshRegions();
-
-// The point an icon grows from: the middle of its edge on the screen-edge side.
-winrt::Windows::Foundation::Numerics::float2 PivotOf(winrt::Windows::Foundation::Rect const& icon) {
-    if (!g_cfg.vertical) return {icon.X + icon.Width / 2, icon.Y + icon.Height};
-    if (g_cfg.rightEdge) return {icon.X + icon.Width, icon.Y + icon.Height / 2};
-    return {icon.X, icon.Y + icon.Height / 2};
-}
-
-void SetItemScale(Item& item, float s, float shift) {
-    item.scale = s;
-    item.shift = shift;
-    FrameworkElement el{nullptr};
-    if (item.trash) {
-        if (g_rowDock) el = g_rowDock->trash;
-    } else {
-        el = item.element.get();
-    }
-    if (!el) return;
-    auto visual = wuxh::ElementCompositionPreview::GetElementVisual(el);
-    visual.CenterPoint({item.pivot.x, item.pivot.y, 0});
-    visual.Scale({s, s, 1});
-    wuxh::ElementCompositionPreview::SetIsTranslationEnabled(el, true);
-    visual.Properties().InsertVector3(
-        L"Translation", g_cfg.vertical ? winrt::Windows::Foundation::Numerics::float3{0, shift, 0}
-                                       : winrt::Windows::Foundation::Numerics::float3{shift, 0, 0});
-
-    // The dot stays where it is across the dock and keeps its size.
-    if (auto dot = item.dot.get()) {
-        auto dv = wuxh::ElementCompositionPreview::GetElementVisual(dot);
-        wuxh::ElementCompositionPreview::SetIsTranslationEnabled(dot, true);
-        float w = (float)dot.ActualWidth(), h = (float)dot.ActualHeight();
-        dv.CenterPoint({w / 2, h / 2, 0});
-        dv.Scale({1 / s, 1 / s, 1});
-        float p = g_cfg.vertical ? item.pivot.x : item.pivot.y;
-        float t = (item.dotCenter - p) / s + p - item.dotCenter;
-        dv.Properties().InsertVector3(
-            L"Translation", g_cfg.vertical ? winrt::Windows::Foundation::Numerics::float3{t, 0, 0}
-                                           : winrt::Windows::Foundation::Numerics::float3{0, t, 0});
-    }
-}
-
-void ResetItem(Item& item) {
-    try {
-        SetItemScale(item, 1.0f, 0);
-    } catch (...) {
-    }
-}
-
-// Re-reads the icons of `dock`, in their current order. Items that were
-// already there keep their current size.
-void BuildRow(Dock* dock) {
-    std::vector<Item> old = std::move(g_row);
-    Dock* oldDock = g_rowDock;
-    g_row.clear();
-    g_rowDock = dock;
-    if (oldDock != dock) g_maxGrowth = g_lastGrowth = 0;
-
-    auto repeater = dock ? dock->repeater.get() : nullptr;
-    if (repeater) {
-        float crossSize = (float)(g_cfg.vertical ? repeater.ActualWidth() : repeater.ActualHeight());
-        int count = wxm::VisualTreeHelper::GetChildrenCount(repeater);
-        for (int i = 0; i < count; i++) {
-            auto el = wxm::VisualTreeHelper::GetChild(repeater, i).try_as<FrameworkElement>();
-            if (!el || el.Visibility() != Visibility::Visible || el.ActualWidth() <= 0 ||
-                el.ActualHeight() <= 0) {
-                continue;
-            }
-            auto cls = winrt::get_class_name(el);
-            if (cls != L"Taskbar.TaskListButton" && cls != L"Taskbar.ExperienceToggleButton") {
-                continue;
-            }
-            // Where the taskbar laid it out; ignores the scaling applied here.
-            auto slot = wxc::Primitives::LayoutInformation::GetLayoutSlot(el);
-            float cross = g_cfg.vertical ? slot.X : slot.Y;
-            if (cross < -crossSize || cross > crossSize) continue;  // recycled, parked
-            Item item;
-            item.element = winrt::make_weak(el);
-            item.center = g_cfg.vertical ? slot.Y + slot.Height / 2 : slot.X + slot.Width / 2;
-            item.pitch = std::max(1.0f, g_cfg.vertical ? slot.Height : slot.Width);
-            Item* known = nullptr;
-            for (auto& o : old) {
-                if (!o.trash && o.element.get() == el) {
-                    known = &o;
-                    break;
-                }
-            }
-            if (known && known->size == slot.Width + slot.Height * 4096) {
-                // Same button, same size: keep its measurements.
-                item.pivot = known->pivot;
-                item.dot = known->dot;
-                item.dotCenter = known->dotCenter;
-            } else {
-                winrt::Windows::Foundation::Rect iconRect{0, 0, (float)el.ActualWidth(),
-                                                          (float)el.ActualHeight()};
-                float x, y;
-                if (auto icon = DescendantByName(el, L"Icon", 4);
-                    icon && LayoutOffset(icon, el, x, y)) {
-                    iconRect = {x, y, (float)icon.ActualWidth(), (float)icon.ActualHeight()};
-                }
-                item.pivot = PivotOf(iconRect);
-                if (auto dot = DescendantByName(el, L"RunningIndicator", 4);
-                    dot && LayoutOffset(dot, el, x, y)) {
-                    // The dot's own sideways offset (on the left/right) is a
-                    // render transform.
-                    if (auto t = dot.RenderTransform().try_as<wxm::TranslateTransform>()) {
-                        x += (float)t.X();
-                        y += (float)t.Y();
-                    }
-                    item.dot = winrt::make_weak(dot);
-                    item.dotCenter = g_cfg.vertical ? x + (float)dot.ActualWidth() / 2
-                                                    : y + (float)dot.ActualHeight() / 2;
-                }
-            }
-            item.size = slot.Width + slot.Height * 4096;
-            if (known) {
-                item.scale = known->scale;
-                item.shift = known->shift;
-                known->element = nullptr;  // still here; don't reset it below
-            }
-            g_row.push_back(item);
-        }
-        std::sort(g_row.begin(), g_row.end(),
-                  [](Item const& a, Item const& b) { return a.center < b.center; });
-
-        // The Recycle Bin comes last.
-        if (dock->trash && dock->trash.Visibility() == Visibility::Visible && !g_row.empty()) {
-            Item item;
-            item.trash = true;
-            float size = g_cfg.trashSize;
-            float tx = 0, ty = 0, rx = 0, ry = 0;
-            if (auto root = dock->root.get()) {
-                LayoutOffset(dock->trash, root, tx, ty);
-                LayoutOffset(repeater, root, rx, ry);
-            }
-            item.center = (g_cfg.vertical ? ty - ry : tx - rx) + size / 2;
-            item.pitch = g_cfg.trashSlot;
-            item.pivot = PivotOf({0, 0, size, size});
-            for (auto& o : old) {
-                if (o.trash && oldDock == dock) {
-                    item.scale = o.scale;
-                    item.shift = o.shift;
-                    o.trash = false;
-                    o.element = nullptr;
-                }
-            }
-            g_row.push_back(item);
-        }
-    }
-
-    // Icons that dropped out go back to normal size right away.
-    Dock* current = g_rowDock;
-    for (auto& o : old) {
-        if (o.trash) {
-            g_rowDock = oldDock;
-            ResetItem(o);
-            g_rowDock = current;
-            if (oldDock && oldDock->divider) {
-                try {
-                    wuxh::ElementCompositionPreview::GetElementVisual(oldDock->divider)
-                        .Properties()
-                        .InsertVector3(L"Translation", {0, 0, 0});
-                } catch (...) {
-                }
-            }
-        } else if (o.element.get()) {
-            ResetItem(o);
-        }
-    }
-    if (oldDock && oldDock != dock) ApplyGlass(*oldDock, 0, 0);
-}
-
-void StopFrames() {
-    if (!g_frameRunning) return;
-    wxm::CompositionTarget::Rendering(g_frameToken);
-    g_frameRunning = false;
-}
 
 void SetExpanded(bool expanded) {
     if (expanded == g_expanded) return;
@@ -11147,103 +11027,212 @@ void SetExpanded(bool expanded) {
     }
 }
 
-void OnFrame() {
-    auto now = std::chrono::steady_clock::now();
-    float dt = std::chrono::duration<float>(now - g_lastFrame).count();
-    g_lastFrame = now;
-    if (dt > 0.1f) dt = 0.1f;
-    float alpha = 1.0f;
-    if (g_cfg.animMs > 0) {
-        float tau = g_cfg.animMs / 1000.0f / 3.0f;
-        alpha = 1.0f - std::exp(-dt / tau);
-    }
-
-    if (g_rowDock) BuildRow(g_rowDock);
-
-    // 1. Move each icon's size toward its target (cosine falloff).
-    bool settled = true;
-    std::vector<float> scales(g_row.size(), 1.0f);
-    for (size_t i = 0; i < g_row.size(); i++) {
-        auto& item = g_row[i];
-        float target = 1.0f;
-        if (g_pointerOver) {
-            float d = std::fabs(g_pointer - item.center);
-            if (d < g_cfg.radius) {
-                float k = (std::cos(d / g_cfg.radius * 3.14159265f) + 1.0f) / 2.0f;
-                target = 1.0f + (g_cfg.maxScale - 1.0f) * k;
-            }
-        }
-        float s = item.scale + (target - item.scale) * alpha;
-        if (std::fabs(target - s) < 0.001f) {
-            s = target;
-        } else {
-            settled = false;
-        }
-        scales[i] = s;
-    }
-
-    bool expanded = g_pointerOver;
-    for (float s : scales) expanded |= s > 1.0f;
-    SetExpanded(expanded);
-
-    // 2. Spread: every icon is pushed along by the growth of the ones before
-    //    it, and the row is pulled back by part of the total. As on a Mac, the
-    //    end of the dock away from the pointer's half stays put.
-    float total = 0;
-    for (size_t i = 0; i < g_row.size(); i++) total += (scales[i] - 1.0f) * g_row[i].pitch;
-    if (g_pointerOver) {
-        if (!g_row.empty()) {
-            float middle = (g_row.front().center - g_row.front().pitch / 2 +
-                            g_row.back().center + g_row.back().pitch / 2) / 2;
-            g_anchorStart = g_pointer > middle;
-        }
-        g_maxGrowth = std::max(g_maxGrowth, total);
-    } else if (g_lastGrowth > 0) {
-        g_maxGrowth *= total / g_lastGrowth;
-    } else {
-        g_maxGrowth = total;
-    }
-    g_lastGrowth = total;
-    float growStart = g_anchorStart ? g_maxGrowth / 2 : total - g_maxGrowth / 2;
-
-    float before = 0, trashGapShift = 0;
-    for (size_t i = 0; i < g_row.size(); i++) {
-        auto& item = g_row[i];
-        float extra = (scales[i] - 1.0f) * item.pitch;
-        float shift = before + extra / 2 - growStart;
-        if (item.trash) trashGapShift = before - growStart;
-        before += extra;
-        if (scales[i] != item.scale || std::fabs(shift - item.shift) > 0.01f) {
-            SetItemScale(item, scales[i], shift);
-        }
-    }
-    if (g_rowDock && g_rowDock->divider) {
-        auto v = wuxh::ElementCompositionPreview::GetElementVisual(g_rowDock->divider);
-        wuxh::ElementCompositionPreview::SetIsTranslationEnabled(g_rowDock->divider, true);
-        v.Properties().InsertVector3(
-            L"Translation",
-            g_cfg.vertical ? winrt::Windows::Foundation::Numerics::float3{0, trashGapShift, 0}
-                           : winrt::Windows::Foundation::Numerics::float3{trashGapShift, 0, 0});
-    }
-
-    // 3. The glass grows the same way.
-    if (g_rowDock) ApplyGlass(*g_rowDock, std::max(0.0f, growStart), std::max(0.0f, total - growStart));
-
-    if (settled) StopFrames();
+winrt::Windows::Foundation::Numerics::float2 PivotOf(winrt::Windows::Foundation::Rect const& icon) {
+    if (!g_cfg.vertical) return {icon.X + icon.Width / 2, icon.Y + icon.Height};
+    if (g_cfg.rightEdge) return {icon.X + icon.Width, icon.Y + icon.Height / 2};
+    return {icon.X, icon.Y + icon.Height / 2};
 }
 
-void StartFrames() {
-    if (g_frameRunning || g_stopping) return;
-    g_lastFrame = std::chrono::steady_clock::now();
-    g_frameToken = wxm::CompositionTarget::Rendering([](auto&&, auto&&) {
-        try {
-            OnFrame();
-        } catch (...) {
-            Wh_Log(L"Magnification error: 0x%08X", winrt::to_hresult());
-            StopFrames();
+void ResetVisual(FrameworkElement const& el) {
+    try {
+        auto v = wuxh::ElementCompositionPreview::GetElementVisual(el);
+        v.StopAnimation(L"Scale");
+        v.StopAnimation(L"Translation");
+        v.Scale({1, 1, 1});
+        v.Properties().InsertVector3(L"Translation", {0, 0, 0});
+    } catch (...) {
+    }
+}
+
+void ResetRow(Dock& d) {
+    for (auto& item : d.row) {
+        if (auto el = item.element.get()) ResetVisual(el);
+        if (auto dot = item.dot.get()) ResetVisual(dot);
+    }
+    d.row.clear();
+    if (d.divider) ResetVisual(d.divider);
+}
+
+// A cheap fingerprint of where the icons are, to notice when they moved.
+double RowSignature(Dock& d) {
+    auto repeater = d.repeater.get();
+    auto root = d.root.get();
+    if (!repeater || !root) return -1;
+    double sig = root.ActualWidth() * 7 + root.ActualHeight() * 13;
+    int count = wxm::VisualTreeHelper::GetChildrenCount(repeater);
+    for (int i = 0; i < count; i++) {
+        auto el = wxm::VisualTreeHelper::GetChild(repeater, i).try_as<FrameworkElement>();
+        if (!el || el.Visibility() != Visibility::Visible) continue;
+        auto slot = wxc::Primitives::LayoutInformation::GetLayoutSlot(el);
+        sig += (slot.X + 3 * slot.Y + 5 * slot.Width + 11 * slot.Height) * (i + 1);
+    }
+    return sig;
+}
+
+// Re-reads the icons and gives each one its expressions.
+void RebuildRow(Dock& d) {
+    ResetRow(d);
+    d.rowSignature = RowSignature(d);
+    auto repeater = d.repeater.get();
+    auto root = d.root.get();
+    if (!repeater || !root || !d.props) return;
+
+    float crossSize = (float)(g_cfg.vertical ? repeater.ActualWidth() : repeater.ActualHeight());
+    int count = wxm::VisualTreeHelper::GetChildrenCount(repeater);
+    for (int i = 0; i < count; i++) {
+        auto el = wxm::VisualTreeHelper::GetChild(repeater, i).try_as<FrameworkElement>();
+        if (!el || el.Visibility() != Visibility::Visible || el.ActualWidth() <= 0 ||
+            el.ActualHeight() <= 0) {
+            continue;
         }
-    });
-    g_frameRunning = true;
+        auto cls = winrt::get_class_name(el);
+        if (cls != L"Taskbar.TaskListButton" && cls != L"Taskbar.ExperienceToggleButton") continue;
+        // Where the taskbar laid it out; transforms aren't included.
+        auto slot = wxc::Primitives::LayoutInformation::GetLayoutSlot(el);
+        float cross = g_cfg.vertical ? slot.X : slot.Y;
+        if (cross < -crossSize || cross > crossSize) continue;  // recycled, parked
+        RowElement item;
+        item.element = winrt::make_weak(el);
+        item.center = g_cfg.vertical ? slot.Y + slot.Height / 2 : slot.X + slot.Width / 2;
+        item.pitch = std::max(1.0f, g_cfg.vertical ? slot.Height : slot.Width);
+        winrt::Windows::Foundation::Rect iconRect{0, 0, (float)el.ActualWidth(),
+                                                  (float)el.ActualHeight()};
+        float x, y;
+        if (auto icon = DescendantByName(el, L"Icon", 4); icon && LayoutOffset(icon, el, x, y)) {
+            iconRect = {x, y, (float)icon.ActualWidth(), (float)icon.ActualHeight()};
+        }
+        item.pivot = PivotOf(iconRect);
+        if (auto dot = DescendantByName(el, L"RunningIndicator", 4);
+            dot && LayoutOffset(dot, el, x, y)) {
+            if (auto t = dot.RenderTransform().try_as<wxm::TranslateTransform>()) {
+                x += (float)t.X();
+                y += (float)t.Y();
+            }
+            item.dot = winrt::make_weak(dot);
+            item.dotCenter = g_cfg.vertical ? x + (float)dot.ActualWidth() / 2
+                                            : y + (float)dot.ActualHeight() / 2;
+        }
+        d.row.push_back(item);
+    }
+    std::sort(d.row.begin(), d.row.end(),
+              [](RowElement const& a, RowElement const& b) { return a.center < b.center; });
+    if (d.trash && d.trash.Visibility() == Visibility::Visible && !d.row.empty()) {
+        RowElement item;
+        item.trash = true;
+        item.element = winrt::make_weak(FrameworkElement(d.trash));
+        float size = g_cfg.trashSize, tx = 0, ty = 0, rx = 0, ry = 0;
+        LayoutOffset(d.trash, root, tx, ty);
+        LayoutOffset(repeater, root, rx, ry);
+        item.center = (g_cfg.vertical ? ty - ry : tx - rx) + size / 2;
+        item.pitch = g_cfg.trashSlot;
+        item.pivot = PivotOf({0, 0, size, size});
+        d.row.push_back(item);
+    }
+
+    if (!g_cfg.magnify || g_cfg.maxScale <= 1.0f || d.row.empty()) {
+        PlaceGlass(d, L"");
+        return;
+    }
+
+    // k_j: 1 under the pointer, 0 at the range's edge (cosine falloff).
+    float grow = g_cfg.maxScale - 1.0f, radius = g_cfg.radius;
+    float freq = 3.14159265f / radius;
+    std::vector<std::wstring> k, ext;
+    for (auto& item : d.row) {
+        std::wstring c = Num(item.center);
+        std::wstring kj = L"((Abs(p.Pointer - " + c + L") < " + Num(radius) +
+                          L") ? ((Cos((p.Pointer - " + c + L") * " + Num(freq) +
+                          L") + 1) * 0.5) : 0)";
+        k.push_back(kj);
+        ext.push_back(L"(" + Num(grow * item.pitch) + L" * p.Amount * " + kj + L")");
+    }
+    auto sum = [&](size_t from, size_t to) {  // ext[from..to)
+        std::wstring out;
+        for (size_t j = from; j < to; j++) out += (out.empty() ? L"" : L" + ") + ext[j];
+        return out.empty() ? std::wstring(L"0") : out;
+    };
+    std::wstring total = sum(0, ext.size());
+    auto comp = d.props.Compositor();
+    auto start = [&](wuc::CompositionObject const& target, PCWSTR prop, std::wstring const& text) {
+        auto e = comp.CreateExpressionAnimation(text);
+        e.SetReferenceParameter(L"p", d.props);
+        target.StartAnimation(prop, e);
+    };
+
+    for (size_t i = 0; i < d.row.size(); i++) {
+        auto& item = d.row[i];
+        auto el = item.element.get();
+        if (!el) continue;
+        std::wstring scale = L"(1 + " + Num(grow) + L" * p.Amount * " + k[i] + L")";
+        std::wstring shift = L"0.5 * ((" + sum(0, i) + L") - (" + sum(i + 1, ext.size()) + L"))";
+        auto v = wuxh::ElementCompositionPreview::GetElementVisual(el);
+        wuxh::ElementCompositionPreview::SetIsTranslationEnabled(el, true);
+        v.CenterPoint({item.pivot.x, item.pivot.y, 0});
+        start(v, L"Scale", L"Vector3(" + scale + L", " + scale + L", 1)");
+        start(v, L"Translation",
+              g_cfg.vertical ? L"Vector3(0, " + shift + L", 0)" : L"Vector3(" + shift + L", 0, 0)");
+        if (item.trash && d.divider) {
+            // The divider sits in the gap just before the Recycle Bin.
+            std::wstring gap = L"0.5 * ((" + sum(0, i) + L") - (" + sum(i, ext.size()) + L"))";
+            wuxh::ElementCompositionPreview::SetIsTranslationEnabled(d.divider, true);
+            start(wuxh::ElementCompositionPreview::GetElementVisual(d.divider), L"Translation",
+                  g_cfg.vertical ? L"Vector3(0, " + gap + L", 0)" : L"Vector3(" + gap + L", 0, 0)");
+        }
+        // The dot keeps its size and its place across the dock.
+        if (auto dot = item.dot.get()) {
+            auto dv = wuxh::ElementCompositionPreview::GetElementVisual(dot);
+            wuxh::ElementCompositionPreview::SetIsTranslationEnabled(dot, true);
+            dv.CenterPoint({(float)dot.ActualWidth() / 2, (float)dot.ActualHeight() / 2, 0});
+            start(dv, L"Scale", L"Vector3(1 / " + scale + L", 1 / " + scale + L", 1)");
+            float pv = g_cfg.vertical ? item.pivot.x : item.pivot.y;
+            std::wstring t = L"(" + Num(item.dotCenter - pv) + L" / " + scale + L" + " +
+                             Num(pv - item.dotCenter) + L")";
+            start(dv, L"Translation",
+                  g_cfg.vertical ? L"Vector3(" + t + L", 0, 0)" : L"Vector3(0, " + t + L", 0)");
+        }
+    }
+    PlaceGlass(d, total);
+}
+
+void AnimateAmount(Dock& d, float to) {
+    if (!d.props || d.amountTarget == to) return;
+    d.amountTarget = to;
+    if (g_cfg.animMs <= 0) {
+        d.props.StopAnimation(L"Amount");
+        d.props.InsertScalar(L"Amount", to);
+        return;
+    }
+    auto comp = d.props.Compositor();
+    auto anim = comp.CreateScalarKeyFrameAnimation();
+    anim.InsertKeyFrame(1.0f, to,
+                        comp.CreateCubicBezierEasingFunction({0.25f, 0.1f}, {0.25f, 1.0f}));
+    anim.Duration(std::chrono::milliseconds(g_cfg.animMs));
+    d.props.StartAnimation(L"Amount", anim);
+}
+
+void CollapseLater() {
+    auto queue = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+    if (!queue) {
+        SetExpanded(false);
+        return;
+    }
+    if (!g_collapseTimer) {
+        g_collapseTimer = queue.CreateTimer();
+        g_collapseTimer.IsRepeating(false);
+        g_collapseTimer.Tick([](auto&&, auto&&) {
+            if (!g_hoverDock) SetExpanded(false);
+        });
+    }
+    g_collapseTimer.Stop();
+    g_collapseTimer.Interval(std::chrono::milliseconds(std::max(0, g_cfg.animMs) + 150));
+    g_collapseTimer.Start();
+}
+
+void LeaveDock() {
+    if (!g_hoverDock) return;
+    AnimateAmount(*g_hoverDock, 0);
+    g_hoverDock = nullptr;
+    CollapseLater();
 }
 
 // The pointer moved over a taskbar (TaskbarFrame hook).
@@ -11252,43 +11241,47 @@ void OnPointerMoved(FrameworkElement const& frame, Input::PointerRoutedEventArgs
     Dock* d = FindDockByFrame(frame);
     auto root = d ? d->root.get() : nullptr;
     auto repeater = d ? d->repeater.get() : nullptr;
-    bool over = false;
-    if (root && repeater) {
-        auto p = e.GetCurrentPoint(root).Position();
-        float len = (float)(g_cfg.vertical ? root.ActualHeight() : root.ActualWidth());
-        float main = g_cfg.vertical ? p.Y : p.X;
-        float startGrow = std::max(0.0f, d->growStart), endGrow = std::max(0.0f, d->growEnd);
-        bool inMain = main >= -startGrow && main <= len + endGrow;
-        bool sameRow = g_pointerOver && g_rowDock == d;
-        bool inCross;
-        if (!g_cfg.vertical) {
-            inCross = p.Y >= 0 || sameRow;  // above the dock only once it magnifies
-        } else if (g_cfg.rightEdge) {
-            inCross = p.X >= 0 || sameRow;
-        } else {
-            inCross = p.X <= root.ActualWidth() || sameRow;
-        }
-        over = inMain && inCross;
-        if (over) {
-            if (g_rowDock != d) BuildRow(d);
-            auto q = e.GetCurrentPoint(repeater).Position();
-            g_pointer = g_cfg.vertical ? q.Y : q.X;
-        }
+    if (!root || !repeater || !d->props) {
+        LeaveDock();
+        return;
     }
-    if (over != g_pointerOver || over) {
-        g_pointerOver = over;
-        StartFrames();
+    auto p = e.GetCurrentPoint(root).Position();
+    float len = (float)(g_cfg.vertical ? root.ActualHeight() : root.ActualWidth());
+    float main = g_cfg.vertical ? p.Y : p.X;
+    float spread = g_hoverDock == d ? d->glassSpread : 0;
+    bool inMain = main >= -spread && main <= len + spread;
+    bool hovering = g_hoverDock == d;
+    bool inCross;
+    if (!g_cfg.vertical) {
+        inCross = p.Y >= 0 || hovering;  // above the dock only once it magnifies
+    } else if (g_cfg.rightEdge) {
+        inCross = p.X >= 0 || hovering;
+    } else {
+        inCross = p.X <= root.ActualWidth() || hovering;
     }
+    if (!(inMain && inCross)) {
+        LeaveDock();
+        return;
+    }
+    if (g_hoverDock != d) {
+        LeaveDock();
+        if (RowSignature(*d) != d->rowSignature || d->row.empty()) RebuildRow(*d);
+        g_hoverDock = d;
+        if (g_collapseTimer) g_collapseTimer.Stop();
+        SetExpanded(true);
+    }
+    auto q = e.GetCurrentPoint(repeater).Position();
+    d->props.InsertScalar(L"Pointer", g_cfg.vertical ? q.Y : q.X);
+    AnimateAmount(*d, 1);
 }
 
 void OnPointerExited() {
-    if (g_stopping || !g_pointerOver) return;
-    g_pointerOver = false;
-    StartFrames();
+    if (g_stopping) return;
+    LeaveDock();
 }
 
 // For the click-through region: whether magnified icons may reach past the
-// dock, and how much room the taskbar keeps above the dock for them.
+// dock right now.
 bool RegionExpanded() {
     return g_expanded;
 }
@@ -11302,7 +11295,13 @@ void Reset() {
         (!g_dockThread && g_timerThread && g_timerThread != thread)) {
         return;
     }
-    StopFrames();
+    if (g_collapseTimer) {
+        try {
+            g_collapseTimer.Stop();
+        } catch (...) {
+        }
+        g_collapseTimer = nullptr;
+    }
     if (g_setupTimer) {
         try {
             g_setupTimer.Stop();
@@ -11312,13 +11311,18 @@ void Reset() {
         g_timerThread = 0;
     }
     g_pendingFrames.clear();
-    for (auto& item : g_row) ResetItem(item);
-    g_row.clear();
-    g_rowDock = nullptr;
-    g_pointerOver = false;
+    g_hoverDock = nullptr;
     g_expanded = false;
-    g_maxGrowth = g_lastGrowth = 0;
     for (auto& d : *g_docks) {
+        d.rootSizeChanged.revoke();
+        ResetRow(d);
+        if (d.glass) {
+            try {
+                wuxh::ElementCompositionPreview::SetElementChildVisual(d.glass, nullptr);
+                wuxh::ElementCompositionPreview::GetElementVisual(d.glass).Clip(nullptr);
+            } catch (...) {
+            }
+        }
         d.trashTapped.revoke();
         d.trashRightTapped.revoke();
         d.trashDragEnter.revoke();
