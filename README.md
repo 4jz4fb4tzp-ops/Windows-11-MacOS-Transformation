@@ -202,9 +202,6 @@ with:
   
 ## Changelog
 
-- **Changed (macOS Dock 2.3.1):** the dock grows like on a Mac again: the end away from the pointer's half stays put.
-- **Changed (macOS Dock 2.3):** the magnification now runs entirely in the compositor (expressions per icon), so it's as smooth as the screen's refresh rate; the dock's white edge is drawn by the compositor and stays visible while the dock grows.
-- **Changed (macOS Dock 2.2.2):** smoother magnification: the glass grows with a composition clip instead of a new layout every frame.
 - **Fixed (macOS Dock 2.2.1):** maximized windows end right above the dock again with magnification on, the dot stays below a magnified icon, Windows icons sit at the same height as custom ones, smoother magnification.
 - **New (macOS Dock 2.2):** built-in macOS magnification (the dock grows with the icons) and a real Recycle Bin at the end of the dock with a divider: full/empty icon, drop files to delete them, right-click to empty. Both are adapted from the *MacOS Style Dock* mod by Zach Vaughn. The setup no longer installs *Taskbar Dock Animation Plus* and *Taskbar Icon Separators* and turns them off.
 - **New (macOS Dock 2.1):** icon sets. Switch between **macOS** (your chosen icons), **Windows** (original icons) and your own sets, e.g. "Minecraft", with right-click → **Icon set** or in the settings window under **Icon sets**. Every set keeps its own icons and icon folder (new sets get `Documents\MacOs-Dock\Icon-Sets\<name>`).
