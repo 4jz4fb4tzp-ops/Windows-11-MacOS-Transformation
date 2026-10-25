@@ -2,7 +2,7 @@
 // @id              macos-traffic-lights-right
 // @name            macOS Traffic Lights
 // @description     macOS traffic light buttons on the right of the title bar, replacing the native caption buttons – Explorer included
-// @version         3.0
+// @version         3.1
 // @author          Okan
 // @include         *
 // @exclude         dwm.exe
@@ -122,6 +122,10 @@ struct WinState {
     // nothing to paint over either.
     bool sysMenuRemoved = false;
     bool noButtons = false;
+    // Windows drew the caption buttons when the style came off (DWM reported them). Apps
+    // that draw their own buttons without telling Windows (Discord) keep them either way,
+    // so they're painted over instead.
+    bool systemButtons = false;
     // Child windows that answer for the caption buttons (apps that draw their own title bar),
     // subclassed so their buttons stop being buttons too.
     std::vector<HWND> buttonChildren;
@@ -210,9 +214,12 @@ static bool ComputeGeometry(WinState* s) {
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
     bool zoomed = IsZoomed(h);
-    if (!zoomed && fr.left <= mi.rcMonitor.left && fr.top <= mi.rcMonitor.top &&
-        fr.right >= mi.rcMonitor.right && fr.bottom >= mi.rcMonitor.bottom)
-        return false;  // fullscreen (video, game)
+    // Fullscreen (video, game, a browser's F11) drops the resizable frame; a window that's
+    // merely as large as the screen (Discord restores to that) keeps it.
+    if (!zoomed && !(st & WS_THICKFRAME) && fr.left <= mi.rcMonitor.left &&
+        fr.top <= mi.rcMonitor.top && fr.right >= mi.rcMonitor.right &&
+        fr.bottom >= mi.rcMonitor.bottom)
+        return false;
 
     UINT dpi = GetDpiForWindow(h);
     if (!dpi) dpi = 96;
@@ -551,7 +558,7 @@ static bool SampleBackground(WinState* s, bool probe = true) {
 
     std::vector<DWORD> px;
     int w = ov.right - ov.left, h = ov.bottom - ov.top;
-    if (probe) s->noButtons = s->sysMenuRemoved && s->nativeWidth == 0;
+    if (probe) s->noButtons = s->sysMenuRemoved && s->systemButtons && s->nativeWidth == 0;
     if (s->clear || s->noButtons) {
         // Nothing to cover: the overlay stays clear apart from the lights.
         px.assign(w * h, 0);
@@ -582,11 +589,20 @@ static bool SampleBackground(WinState* s, bool probe = true) {
         int boxW = (int)std::min(cellW * 0.6f, 24 * s->scale), boxH = (int)(20 * s->scale);
         int boxTop = (int)(s->lightsCy - boxH / 2.0f);
         std::vector<uint8_t> changed(w * h, 0);
-        for (int i = 0; i < cells; i++) {
-            int cx = (int)(s->nativeLeft - ov.left + (i + 0.5f) * cellW);
-            for (int y = std::max(0, boxTop); y < std::min(h, boxTop + boxH); y++)
-                for (int x = std::max(0, cx - boxW / 2); x < std::min(w, cx + boxW / 2); x++)
+        auto mark = [&](int x0, int y0, int x1, int y1) {
+            for (int y = std::max(0, y0); y < std::min(h, y1); y++)
+                for (int x = std::max(0, x0); x < std::min(w, x1); x++)
                     changed[y * w + x] = ((orig[y * w + x] ^ px[y * w + x]) & 0xFFFFFF) != 0;
+        };
+        if (s->nativeWidth > 0 || s->systemButtons) {
+            for (int i = 0; i < cells; i++) {
+                int cx = (int)(s->nativeLeft - ov.left + (i + 0.5f) * cellW);
+                mark(cx - boxW / 2, boxTop, cx + boxW / 2, boxTop + boxH);
+            }
+        } else {
+            // The app draws its buttons without reporting where (Discord): their size and
+            // layout are its own, so the whole corner is searched.
+            mark(0, 0, w, h);
         }
         for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++) {
@@ -1001,6 +1017,10 @@ static LRESULT CALLBACK ButtonChildSubclassProc(HWND h, UINT m, WPARAM w, LPARAM
 static void RemoveSysMenu(WinState* s) {
     LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
     if (!g_settings.hideNative || !(st & WS_SYSMENU)) return;
+    RECT b;
+    s->systemButtons =
+        SUCCEEDED(DwmGetWindowAttribute(s->hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &b, sizeof(b))) &&
+        b.right > b.left && b.bottom > b.top;
     s->sysMenuRemoved = true;
     SetWindowLongW(s->hwnd, GWL_STYLE, st & ~WS_SYSMENU);
     SetWindowPos(s->hwnd, nullptr, 0, 0, 0, 0,
