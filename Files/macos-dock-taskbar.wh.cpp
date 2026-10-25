@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.3.0
+// @version         2.3.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -10159,6 +10159,7 @@ struct Dock {
     // magnification itself, at the screen's refresh rate.
     wuc::CompositionPropertySet props{nullptr};
     float amountTarget = 0;
+    float maxGrowth = 0;  // widest the dock got during this hover (full amount)
     std::vector<RowElement> row;
     double rowSignature = -1;
     FrameworkElement::SizeChanged_revoker rootSizeChanged;
@@ -10197,7 +10198,7 @@ std::wstring Num(float v) {
 
 // Puts the glass's clip and white edge in place. With `expressions` they
 // follow the magnification's total growth "T"; without, they sit still.
-void PlaceGlass(Dock& d, std::wstring const& total) {
+void PlaceGlass(Dock& d, std::wstring const& total, std::wstring const& start = L"") {
     auto root = d.root.get();
     if (!root || !d.glassClip) return;
     float w = (float)root.ActualWidth(), h = (float)root.ActualHeight(), m = d.glassSpread;
@@ -10219,10 +10220,10 @@ void PlaceGlass(Dock& d, std::wstring const& total) {
         }
         std::wstring offset, size;
         if (g_cfg.vertical) {
-            offset = L"Vector2(" + Num(inset) + L", " + Num(m + inset) + L" - 0.5 * (" + total + L"))";
+            offset = L"Vector2(" + Num(inset) + L", " + Num(m + inset) + L" - (" + start + L"))";
             size = L"Vector2(" + Num(w - 2 * inset) + L", " + Num(h - 2 * inset) + L" + (" + total + L"))";
         } else {
-            offset = L"Vector2(" + Num(m + inset) + L" - 0.5 * (" + total + L"), " + Num(inset) + L")";
+            offset = L"Vector2(" + Num(m + inset) + L" - (" + start + L"), " + Num(inset) + L")";
             size = L"Vector2(" + Num(w - 2 * inset) + L" + (" + total + L"), " + Num(h - 2 * inset) + L")";
         }
         auto e1 = comp.CreateExpressionAnimation(offset);
@@ -10252,6 +10253,8 @@ void SetupGlass(Dock& d, wxc::Grid const& root) {
     d.props = comp.CreatePropertySet();
     d.props.InsertScalar(L"Pointer", 0);
     d.props.InsertScalar(L"Amount", 0);
+    d.props.InsertScalar(L"AnchorStart", 1);
+    d.props.InsertScalar(L"Half", 0);
 
     float r = (float)macdock::GetPx(L"cornerRadius");
     d.glassClip = comp.CreateRoundedRectangleGeometry();
@@ -11152,6 +11155,12 @@ void RebuildRow(Dock& d) {
         return out.empty() ? std::wstring(L"0") : out;
     };
     std::wstring total = sum(0, ext.size());
+    // How far the row is pulled back toward the start. As on a Mac, the ends
+    // sit where they'd be if the dock had grown evenly to its widest so far
+    // ("Half" = half of that), and the end away from the pointer's half stays
+    // put ("AnchorStart"). Scaled by Amount, so fading keeps the shape.
+    std::wstring growStart = L"(p.AnchorStart * p.Half * p.Amount + (1 - p.AnchorStart) * ((" +
+                             total + L") - p.Half * p.Amount))";
     auto comp = d.props.Compositor();
     auto start = [&](wuc::CompositionObject const& target, PCWSTR prop, std::wstring const& text) {
         auto e = comp.CreateExpressionAnimation(text);
@@ -11164,7 +11173,8 @@ void RebuildRow(Dock& d) {
         auto el = item.element.get();
         if (!el) continue;
         std::wstring scale = L"(1 + " + Num(grow) + L" * p.Amount * " + k[i] + L")";
-        std::wstring shift = L"0.5 * ((" + sum(0, i) + L") - (" + sum(i + 1, ext.size()) + L"))";
+        std::wstring shift =
+            L"(" + sum(0, i) + L") + 0.5 * " + ext[i] + L" - " + growStart;
         auto v = wuxh::ElementCompositionPreview::GetElementVisual(el);
         wuxh::ElementCompositionPreview::SetIsTranslationEnabled(el, true);
         v.CenterPoint({item.pivot.x, item.pivot.y, 0});
@@ -11173,7 +11183,7 @@ void RebuildRow(Dock& d) {
               g_cfg.vertical ? L"Vector3(0, " + shift + L", 0)" : L"Vector3(" + shift + L", 0, 0)");
         if (item.trash && d.divider) {
             // The divider sits in the gap just before the Recycle Bin.
-            std::wstring gap = L"0.5 * ((" + sum(0, i) + L") - (" + sum(i, ext.size()) + L"))";
+            std::wstring gap = L"(" + sum(0, i) + L") - " + growStart;
             wuxh::ElementCompositionPreview::SetIsTranslationEnabled(d.divider, true);
             start(wuxh::ElementCompositionPreview::GetElementVisual(d.divider), L"Translation",
                   g_cfg.vertical ? L"Vector3(0, " + gap + L", 0)" : L"Vector3(" + gap + L", 0, 0)");
@@ -11191,7 +11201,7 @@ void RebuildRow(Dock& d) {
                   g_cfg.vertical ? L"Vector3(" + t + L", 0, 0)" : L"Vector3(0, " + t + L", 0)");
         }
     }
-    PlaceGlass(d, total);
+    PlaceGlass(d, total, growStart);
 }
 
 void AnimateAmount(Dock& d, float to) {
@@ -11263,7 +11273,9 @@ void OnPointerMoved(FrameworkElement const& frame, Input::PointerRoutedEventArgs
         LeaveDock();
         return;
     }
-    if (g_hoverDock != d) {
+    bool entering = g_hoverDock != d;
+    bool wasExpanded = g_expanded;
+    if (entering) {
         LeaveDock();
         if (RowSignature(*d) != d->rowSignature || d->row.empty()) RebuildRow(*d);
         g_hoverDock = d;
@@ -11271,7 +11283,29 @@ void OnPointerMoved(FrameworkElement const& frame, Input::PointerRoutedEventArgs
         SetExpanded(true);
     }
     auto q = e.GetCurrentPoint(repeater).Position();
-    d->props.InsertScalar(L"Pointer", g_cfg.vertical ? q.Y : q.X);
+    float x = g_cfg.vertical ? q.Y : q.X;
+    // The dock's growth at full magnification for this pointer position, the
+    // same sum the expressions make.
+    float full = 0;
+    for (auto& item : d->row) {
+        float dist = std::fabs(x - item.center);
+        if (dist < g_cfg.radius) {
+            float k = (std::cos(dist / g_cfg.radius * 3.14159265f) + 1.0f) / 2.0f;
+            full += (g_cfg.maxScale - 1.0f) * item.pitch * k;
+        }
+    }
+    if (entering && !wasExpanded) {
+        d->maxGrowth = full;  // a new hover, not one picked up while shrinking
+    } else {
+        d->maxGrowth = std::max(d->maxGrowth, full);
+    }
+    if (!d->row.empty()) {
+        float middle = (d->row.front().center - d->row.front().pitch / 2 +
+                        d->row.back().center + d->row.back().pitch / 2) / 2;
+        d->props.InsertScalar(L"AnchorStart", x > middle ? 1.0f : 0.0f);
+    }
+    d->props.InsertScalar(L"Half", d->maxGrowth / 2);
+    d->props.InsertScalar(L"Pointer", x);
     AnimateAmount(*d, 1);
 }
 

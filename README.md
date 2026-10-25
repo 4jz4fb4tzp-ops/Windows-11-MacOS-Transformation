@@ -202,6 +202,7 @@ with:
   
 ## Changelog
 
+- **Changed (macOS Dock 2.3.1):** the dock grows like on a Mac again: the end away from the pointer's half stays put.
 - **Changed (macOS Dock 2.3):** the magnification now runs entirely in the compositor (expressions per icon), so it's as smooth as the screen's refresh rate; the dock's white edge is drawn by the compositor and stays visible while the dock grows.
 - **Changed (macOS Dock 2.2.2):** smoother magnification: the glass grows with a composition clip instead of a new layout every frame.
 - **Fixed (macOS Dock 2.2.1):** maximized windows end right above the dock again with magnification on, the dot stays below a magnified icon, Windows icons sit at the same height as custom ones, smoother magnification.
