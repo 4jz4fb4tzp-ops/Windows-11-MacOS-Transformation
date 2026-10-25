@@ -98,6 +98,13 @@ struct Img {
     std::vector<uint32_t> px;  // BGRA, vormultipliert
 };
 
+// Everything a drawn card depends on besides its snapshot and icon.
+struct LayerKey {
+    RECT card;
+    float hover;
+    int edge, surfW, surfH, tilt, cardW, scale100;
+};
+
 struct StagedWindow {
     HWND hwnd;
     WINDOWPLACEMENT wp;
@@ -106,6 +113,12 @@ struct StagedWindow {
     Img icon;
     RECT card;   // Kartenposition im Streifen (Client-Koordinaten)
     float hover; // 0..1
+    // The card and its icon, drawn once into their own premultiplied layer and
+    // reused until the key changes or the snapshot is retaken (see EnsureLayer).
+    std::vector<uint32_t> layer;
+    RECT layerBox;
+    LayerKey layerKey;
+    bool layerValid;
 };
 
 struct {
@@ -695,9 +708,16 @@ static void Sample(const Img& im, float fx, float fy, float c[4]) {
     }
 }
 
+// Where DrawCard / DrawAppIcon draw: a card's layer, placed at g_dstX/g_dstY in
+// surface coordinates.
+static uint32_t* g_dst;
+static int g_dstX, g_dstY, g_dstW, g_dstH;
+
 static inline void BlendPx(int x, int y, float b, float g, float r, float a) {
-    if (a <= 0.002f || x < 0 || y < 0 || x >= g_W || y >= g_H) return;
-    uint32_t& d = g_bits[y * g_W + x];
+    x -= g_dstX;
+    y -= g_dstY;
+    if (a <= 0.002f || x < 0 || y < 0 || x >= g_dstW || y >= g_dstH) return;
+    uint32_t& d = g_dst[y * g_dstW + x];
     float ia = 1.f - a;
     auto ch = [&](float s, int sh) {
         int v = (int)(s * 255.f + ((d >> sh) & 255) * ia + 0.5f);
@@ -891,17 +911,86 @@ static void ApplyPosition() {
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
+// The surface area a card's drawing can touch: its shadow box and its icon.
+static RECT LayerBox(const StagedWindow& s) {
+    CardGeo g = Geo(s);
+    float sr = (float)Scale(18), soff = (float)Scale(6);
+    RECT box{(int)floorf(g.x0 - sr), (int)floorf(g.cy - g.ch * 0.5f - sr),
+             (int)ceilf(g.x0 + g.cw + sr), (int)ceilf(g.cy + g.ch * 0.5f + sr + soff)};
+    bool left = g_edge == ABE_LEFT;
+    float isz = (float)Scale(34) * (1.f + 0.07f * s.hover);
+    float ex = left ? g.x0 : g.x0 + g.cw, ey = g.cy + g.ch * 0.5f;
+    float ix = left ? ex - isz * 0.3f : ex - isz * 0.7f, iy = ey - isz * 0.65f;
+    RECT icon{(int)floorf(ix), (int)floorf(iy), (int)ceilf(ix + isz), (int)ceilf(iy + isz)};
+    UnionRect(&box, &box, &icon);
+    RECT surf{0, 0, g_W, g_H};
+    IntersectRect(&box, &box, &surf);
+    return box;
+}
+
+static bool SameKey(const LayerKey& a, const LayerKey& b) {
+    return EqualRect(&a.card, &b.card) && a.hover == b.hover && a.edge == b.edge &&
+           a.surfW == b.surfW && a.surfH == b.surfH && a.tilt == b.tilt &&
+           a.cardW == b.cardW && a.scale100 == b.scale100;
+}
+
+// Redraws a card's layer only when something it depends on changed, so a hover
+// animation repaints just the cards that are moving.
+static void EnsureLayer(StagedWindow& s) {
+    LayerKey key{s.card, s.hover, (int)g_edge, g_W, g_H, g_settings.tilt ? 1 : 0,
+                 Scale(g_settings.cardWidth), Scale(100)};
+    if (s.layerValid && SameKey(key, s.layerKey)) return;
+    s.layerKey = key;
+    s.layerValid = true;
+    s.layerBox = LayerBox(s);
+    int w = s.layerBox.right - s.layerBox.left, h = s.layerBox.bottom - s.layerBox.top;
+    s.layer.assign(w > 0 && h > 0 ? (size_t)w * h : 0, 0);
+    if (s.layer.empty()) return;
+    g_dst = s.layer.data();
+    g_dstX = s.layerBox.left;
+    g_dstY = s.layerBox.top;
+    g_dstW = w;
+    g_dstH = h;
+    DrawCard(s);
+    DrawAppIcon(s);
+}
+
+// Premultiplied "over" of a card's layer onto the surface.
+static void CompositeLayer(const StagedWindow& s) {
+    int w = s.layerBox.right - s.layerBox.left, h = s.layerBox.bottom - s.layerBox.top;
+    if (s.layer.empty()) return;
+    for (int y = 0; y < h; y++) {
+        const uint32_t* src = s.layer.data() + (size_t)y * w;
+        uint32_t* dst = g_bits + (size_t)(y + s.layerBox.top) * g_W + s.layerBox.left;
+        for (int x = 0; x < w; x++) {
+            uint32_t p = src[x];
+            uint32_t sa = p >> 24;
+            if (!sa) continue;
+            if (sa == 255) {
+                dst[x] = p;
+                continue;
+            }
+            uint32_t d = dst[x], inv = 255 - sa, out = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                uint32_t v = ((p >> sh) & 255) + (((d >> sh) & 255) * inv + 127) / 255;
+                out |= (v > 255 ? 255 : v) << sh;
+            }
+            dst[x] = out;
+        }
+    }
+}
+
 static void Render() {
     if (!g_bits) return;
     memset(g_bits, 0, (size_t)g_W * g_H * 4);
     for (int i = (int)g_staged.size() - 1; i >= 0; i--) {
         if (i == g_hoverIdx) continue;
-        DrawCard(g_staged[i]);
-        DrawAppIcon(g_staged[i]);
+        EnsureLayer(g_staged[i]);
+        CompositeLayer(g_staged[i]);
     }
     if (g_hoverIdx >= 0 && g_hoverIdx < (int)g_staged.size()) {
-        DrawCard(g_staged[g_hoverIdx]);
-        DrawAppIcon(g_staged[g_hoverIdx]);
+        EnsureLayer(g_staged[g_hoverIdx]);
+        CompositeLayer(g_staged[g_hoverIdx]);
     }
     ApplyPosition();
 }
@@ -1027,7 +1116,8 @@ static void MoveAside(HWND h) {
 }
 
 static void Poll() {
-    if (!g_started || !g_enabled) return;
+    // Runs every 60 ms; with nothing staged the strip is hidden anyway.
+    if (!g_started || !g_enabled || g_staged.empty()) return;
     bool full = ForegroundIsFullscreen();
     bool covered = full || ActiveCovers();
     if (!covered || full) {
@@ -1208,11 +1298,15 @@ static void InitialCollect() {
 }
 
 static void SnapTick() {
-    if (!g_started || !g_enabled || g_staged.empty() || g_slide >= 0.999f) return;
+    // PrintWindow makes the app redraw its whole window and DWM read it back, so
+    // it's left out while cards are animating, where it would make them stutter.
+    if (!g_started || !g_enabled || g_staged.empty() || g_slide >= 0.999f || g_animRunning)
+        return;
     if (g_snapCursor >= g_staged.size()) g_snapCursor = 0;
     auto& s = g_staged[g_snapCursor++];
     int ow = s.snap.w, oh = s.snap.h;
     if (CaptureWindow(s.hwnd, s.snap, SnapWidth())) {
+        s.layerValid = false;
         if (s.snap.w != ow || s.snap.h != oh) Layout();
         Render();
     }
@@ -1364,7 +1458,8 @@ static void Start() {
     Layout();
     if (g_enabled) InitialCollect();
     SetTimer(g_strip, TIMER_POLL, 60, nullptr);
-    SetTimer(g_strip, TIMER_SNAP, 800, nullptr);
+    // One card per tick, so each snapshot refreshes every n × 2 s.
+    SetTimer(g_strip, TIMER_SNAP, 2000, nullptr);
 }
 
 static void Shutdown() {
@@ -1442,7 +1537,10 @@ static LRESULT CALLBACK StripProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 UpdateHotkey();
                 UpdateTray();
                 g_edge = ComputeEdge();
-                for (auto& s : g_staged) LoadIconFor(s);
+                for (auto& s : g_staged) {
+                    LoadIconFor(s);
+                    s.layerValid = false;
+                }
                 Trim();
                 Refresh();
             }
