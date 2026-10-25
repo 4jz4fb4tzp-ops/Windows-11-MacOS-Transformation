@@ -170,8 +170,11 @@ settings window under **Effects**.
 
 - **Magnification:** icons grow under the pointer and push the others aside,
   like on a Mac. Size, range and animation speed are adjustable. The taskbar
-  keeps a little room above the dock for it, so maximized windows end a bit
-  higher. Don't use *Taskbar Dock Animation Plus* at the same time.
+  keeps room above the dock for it; maximized windows still end right above
+  the dock, because the dock turns on *Automatically hide the taskbar* (the
+  taskbar never actually hides) and keeps the dock's strip free itself. It's
+  set back when the mod is turned off. Don't use *Taskbar Dock Animation Plus*
+  at the same time.
 - **Recycle Bin:** sits at the end of the dock after a divider, shows whether
   it's full, opens on click, deletes files you drop on it (they can be
   restored) and empties with right-click. Its icon comes from the icon folder
@@ -199,6 +202,7 @@ with:
   
 ## Changelog
 
+- **Fixed (macOS Dock 2.2.1):** maximized windows end right above the dock again with magnification on, the dot stays below a magnified icon, Windows icons sit at the same height as custom ones, smoother magnification.
 - **New (macOS Dock 2.2):** built-in macOS magnification (the dock grows with the icons) and a real Recycle Bin at the end of the dock with a divider: full/empty icon, drop files to delete them, right-click to empty. Both are adapted from the *MacOS Style Dock* mod by Zach Vaughn. The setup no longer installs *Taskbar Dock Animation Plus* and *Taskbar Icon Separators* and turns them off.
 - **New (macOS Dock 2.1):** icon sets. Switch between **macOS** (your chosen icons), **Windows** (original icons) and your own sets, e.g. "Minecraft", with right-click → **Icon set** or in the settings window under **Icon sets**. Every set keeps its own icons and icon folder (new sets get `Documents\MacOs-Dock\Icon-Sets\<name>`).
 - **Fixed (macOS Dock 2.0.7):** after moving the dock back to the bottom, opened apps that aren't pinned could keep a turned icon.

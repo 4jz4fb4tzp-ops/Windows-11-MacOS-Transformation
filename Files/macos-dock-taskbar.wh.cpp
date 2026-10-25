@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.2.0
+// @version         2.2.1
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -9864,9 +9864,15 @@ void ApplyDockSettings() {
     {
         int nativeIconSize = GetPx(L"nativeIconSize");
         if (nativeIconSize <= 0) nativeIconSize = 24;
+        // Same shift across the dock as the custom icons get from their margins
+        // (see iconMargin below), so both kinds sit at the same height.
+        std::wstring nativeMargin =
+            !vertical   ? Fmt(L"Margin=0,%d,0,%d", -iconOffsetY, iconOffsetY)
+            : rightEdge ? Fmt(L"Margin=%d,0,%d,0", -iconOffsetY, iconOffsetY)
+                        : Fmt(L"Margin=%d,0,%d,0", iconOffsetY, -iconOffsetY);
         std::vector<std::wstring> nativeIconStyles{
             Fmt(L"Width=%d", nativeIconSize), Fmt(L"Height=%d", nativeIconSize),
-            L"Stretch=Uniform"};
+            L"Stretch=Uniform", nativeMargin};
         if (vertical) {
             // The icon sits in a column sized for the Windows icon, which is
             // narrower than the dock icons and cuts them off on the right.
@@ -10004,6 +10010,7 @@ void ApplyDockSettings() {
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
+#include <shellscalingapi.h>
 #include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
 
@@ -10086,6 +10093,23 @@ FrameworkElement ChildByName(DependencyObject const& parent, PCWSTR name) {
         if (child && child.Name() == name) return child;
     }
     return nullptr;
+}
+
+// Where `el` was laid out inside `ancestor`. Unlike TransformToVisual this
+// leaves out the scaling and shifting the magnification applies (and any
+// render transform), so it doesn't feed back into itself.
+bool LayoutOffset(UIElement const& el, UIElement const& ancestor, float& x, float& y) {
+    x = y = 0;
+    DependencyObject current = el;
+    while (current && current != ancestor) {
+        if (auto ui = current.try_as<UIElement>()) {
+            auto o = ui.ActualOffset();
+            x += o.x;
+            y += o.y;
+        }
+        current = wxm::VisualTreeHelper::GetParent(current);
+    }
+    return (bool)current;
 }
 
 FrameworkElement DescendantByName(DependencyObject const& parent, PCWSTR name, int depth) {
@@ -10291,8 +10315,22 @@ void UpdateTrashIcons() {
     }
 }
 
+constexpr UINT kAppBarMessage = WM_APP + 0x42;
+constexpr UINT kUpdateOverWindowsMessage = WM_APP + 0x43;
+void ScheduleOverWindows(bool autoHide);
+void UpdateOverWindows();
+
 LRESULT CALLBACK FxWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case kAppBarMessage:
+            if (wParam == ABN_POSCHANGED) ScheduleOverWindows(false);
+            return 0;
+        case WM_DISPLAYCHANGE:
+            ScheduleOverWindows(false);
+            break;
+        case kUpdateOverWindowsMessage:
+            UpdateOverWindows();
+            return 0;
         case kTrashChangedMessage:
             CheckRecycleBinSoon();
             return 0;
@@ -10316,22 +10354,31 @@ HINSTANCE FxModule() {
     return module;
 }
 
-// Watches the Recycle Bin from a message window on the taskbar's thread.
+bool RegisterFxClass() {
+    static bool registered = [] {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = FxWindowProc;
+        wc.hInstance = FxModule();
+        wc.lpszClassName = kFxWindowClass;
+        return RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }();
+    return registered;
+}
+
+// A message window on the taskbar's thread, for the Recycle Bin and app bar
+// notifications and for work that must run outside the taskbar's own code.
+HWND EnsureFxWindow() {
+    if (!g_fxWindow && RegisterFxClass()) {
+        g_fxWindow = CreateWindowExW(0, kFxWindowClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                                     nullptr, FxModule(), nullptr);
+    }
+    return g_fxWindow;
+}
+
+// Watches the Recycle Bin.
 void StartTrashWatch() {
     if (!g_trashWork) g_trashWork = CreateThreadpoolWork(CheckRecycleBin, nullptr, nullptr);
-    if (!g_fxWindow) {
-        static bool registered = [] {
-            WNDCLASSW wc{};
-            wc.lpfnWndProc = FxWindowProc;
-            wc.hInstance = FxModule();
-            wc.lpszClassName = kFxWindowClass;
-            return RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
-        }();
-        if (registered) {
-            g_fxWindow = CreateWindowExW(0, kFxWindowClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
-                                         nullptr, FxModule(), nullptr);
-        }
-    }
+    EnsureFxWindow();
     CheckRecycleBinSoon();
     if (g_trashNotify || !g_fxWindow) return;
     PIDLIST_ABSOLUTE bin;
@@ -10485,6 +10532,203 @@ void HookUpTrash(Dock& d) {
     });
 }
 
+// ---- Maximized windows end where they did before ----
+// The taskbar is taller than the dock to leave room for magnified icons. So
+// that maximized windows still end right above the dock, as before:
+// - "Automatically hide the taskbar" is turned on (and back off later, if it
+//   was off), so Windows keeps no space free for the taskbar, and the taskbar
+//   is kept from actually hiding (TrayUI::_Hide hooks).
+// - An app bar keeps just the dock's strip free on each screen with a taskbar.
+// - The click-through region leaves out the room above the dock while no icon
+//   is magnified, so that room doesn't cover the windows.
+
+constexpr UINT kTraySettingMessage = WM_USER + 0x1CA;  // TrayUI private setting
+constexpr WPARAM kTraySettingAutoHideGet = 3;
+constexpr WPARAM kTraySettingAutoHideSet = 4;
+constexpr WCHAR kStateKey[] = L"Software\\MacOsDockMod";
+
+std::atomic<bool> g_keepShown{false};  // read by the TrayUI hooks
+bool g_managingAutoHide = false, g_autoHideBefore = false, g_autoHideLoaded = false;
+
+void LoadAutoHideState() {
+    if (g_autoHideLoaded) return;
+    g_autoHideLoaded = true;
+    DWORD v = 0, size = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, kStateKey, L"ManagingAutoHide", RRF_RT_REG_DWORD,
+                     nullptr, &v, &size) == ERROR_SUCCESS) {
+        g_managingAutoHide = v != 0;
+    }
+    size = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, kStateKey, L"AutoHideBefore", RRF_RT_REG_DWORD,
+                     nullptr, &v, &size) == ERROR_SUCCESS) {
+        g_autoHideBefore = v != 0;
+    }
+}
+
+void SaveAutoHideState() {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kStateKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr,
+                        &key, nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+    DWORD a = g_managingAutoHide, b = g_autoHideBefore;
+    RegSetValueExW(key, L"ManagingAutoHide", 0, REG_DWORD, (const BYTE*)&a, sizeof(a));
+    RegSetValueExW(key, L"AutoHideBefore", 0, REG_DWORD, (const BYTE*)&b, sizeof(b));
+    RegCloseKey(key);
+}
+
+HWND FindPrimaryTaskbar() {
+    HWND result = nullptr;
+    EnumWindows(
+        [](HWND w, LPARAM l) -> BOOL {
+            DWORD pid;
+            WCHAR cls[32];
+            if (GetWindowThreadProcessId(w, &pid) && pid == GetCurrentProcessId() &&
+                GetClassNameW(w, cls, ARRAYSIZE(cls)) && !_wcsicmp(cls, L"Shell_TrayWnd")) {
+                *(HWND*)l = w;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        (LPARAM)&result);
+    return result;
+}
+
+template <typename F>
+void ForEachTaskbarWindow(F f) {
+    EnumWindows(
+        [](HWND w, LPARAM l) -> BOOL {
+            DWORD pid;
+            WCHAR cls[32];
+            if (GetWindowThreadProcessId(w, &pid) && pid == GetCurrentProcessId() &&
+                GetClassNameW(w, cls, ARRAYSIZE(cls)) &&
+                (!_wcsicmp(cls, L"Shell_TrayWnd") || !_wcsicmp(cls, L"Shell_SecondaryTrayWnd"))) {
+                (*(F*)l)(w);
+            }
+            return TRUE;
+        },
+        (LPARAM)&f);
+}
+
+// Turns auto-hide on while `keep`, or puts back what it was.
+void ApplyAutoHide(bool keep) {
+    LoadAutoHideState();
+    HWND tb = FindPrimaryTaskbar();
+    if (!tb) return;
+    if (keep) {
+        if (!g_managingAutoHide) {
+            g_autoHideBefore =
+                SendMessageW(tb, kTraySettingMessage, kTraySettingAutoHideGet, 0) != 0;
+            g_managingAutoHide = true;
+        }
+        SendMessageW(tb, kTraySettingMessage, kTraySettingAutoHideSet, TRUE);
+    } else if (g_managingAutoHide) {
+        SendMessageW(tb, kTraySettingMessage, kTraySettingAutoHideSet, g_autoHideBefore);
+        g_managingAutoHide = false;
+    } else {
+        return;
+    }
+    SaveAutoHideState();
+    Wh_Log(L"[dock] auto-hide managed: %d", g_managingAutoHide);
+}
+
+struct AppBar {
+    HWND hwnd;
+    RECT rect;
+};
+std::vector<AppBar> g_appBars;
+
+void RemoveAppBars() {
+    for (auto& bar : g_appBars) {
+        APPBARDATA abd{sizeof(abd)};
+        abd.hWnd = bar.hwnd;
+        SHAppBarMessage(ABM_REMOVE, &abd);
+        DestroyWindow(bar.hwnd);
+    }
+    g_appBars.clear();
+}
+
+UINT DockEdge() {
+    return !g_cfg.vertical ? ABE_BOTTOM : g_cfg.rightEdge ? ABE_RIGHT : ABE_LEFT;
+}
+
+void AddAppBar(RECT const& rect) {
+    HWND w = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kFxWindowClass, L"", WS_POPUP,
+                             0, 0, 0, 0, nullptr, nullptr, FxModule(), nullptr);
+    if (!w) return;
+    g_appBars.push_back({w, rect});
+    APPBARDATA abd{sizeof(abd)};
+    abd.hWnd = w;
+    abd.uCallbackMessage = kAppBarMessage;
+    SHAppBarMessage(ABM_NEW, &abd);
+    abd.uEdge = DockEdge();
+    abd.rc = rect;
+    SHAppBarMessage(ABM_QUERYPOS, &abd);
+    int w0 = rect.right - rect.left, h0 = rect.bottom - rect.top;
+    if (abd.uEdge == ABE_BOTTOM) abd.rc.top = abd.rc.bottom - h0;
+    else if (abd.uEdge == ABE_LEFT) abd.rc.right = abd.rc.left + w0;
+    else abd.rc.left = abd.rc.right - w0;
+    SHAppBarMessage(ABM_SETPOS, &abd);
+}
+
+// Keeps the strips matching the screens with a taskbar. Only changes them when
+// they don't match: a change is announced to every app bar, these included.
+void UpdateAppBars() {
+    std::vector<RECT> want;
+    if (g_keepShown) {
+        // The taskbar's thickness without the room for magnified icons.
+        int strip = std::max(1, macdock::GetTaskbarThickness() - macdock::MagnifyHeadroom());
+        UINT edge = DockEdge();
+        ForEachTaskbarWindow([&](HWND tb) {
+            HMONITOR monitor = MonitorFromWindow(tb, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO info{sizeof(info)};
+            UINT dpiX = 96, dpiY = 96;
+            if (!GetMonitorInfoW(monitor, &info) ||
+                FAILED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) {
+                return;
+            }
+            RECT r = info.rcMonitor;
+            int px = MulDiv(strip, dpiX, 96);
+            if (edge == ABE_BOTTOM) r.top = r.bottom - px;
+            else if (edge == ABE_LEFT) r.right = r.left + px;
+            else r.left = r.right - px;
+            want.push_back(r);
+        });
+    }
+    bool same = want.size() == g_appBars.size();
+    for (size_t i = 0; same && i < want.size(); i++) same = EqualRect(&want[i], &g_appBars[i].rect);
+    if (same) return;
+    RemoveAppBars();
+    if (want.empty() || !RegisterFxClass()) return;
+    for (auto& r : want) AddAppBar(r);
+}
+
+int g_overWindowsPending = 0;  // 1 = app bars, 2 = and auto-hide
+
+void ScheduleOverWindows(bool autoHide) {
+    bool post = g_overWindowsPending == 0;
+    g_overWindowsPending = std::max(g_overWindowsPending, autoHide ? 2 : 1);
+    if (!post) return;
+    HWND w = EnsureFxWindow();
+    if (!w || !PostMessageW(w, kUpdateOverWindowsMessage, 0, 0)) g_overWindowsPending = 0;
+}
+
+void UpdateOverWindows() {
+    int pending = std::exchange(g_overWindowsPending, 0);
+    if (g_stopping || !pending) return;
+    if (pending == 2) ApplyAutoHide(g_keepShown);
+    UpdateAppBars();
+}
+
+// Mod unload: auto-hide back to what it was. Any thread.
+void RestoreAutoHide() {
+    g_keepShown = false;
+    try {
+        ApplyAutoHide(false);
+    } catch (...) {
+    }
+}
+
 // Puts the Recycle Bin and the divider into the room the RootGrid's padding
 // keeps free after the last app (see macdock::TrashSpace).
 void AddTrash(Dock& d, wxc::Grid const& root, uint32_t index) {
@@ -10584,6 +10828,10 @@ bool SetupDock(FrameworkElement const& frame) {
     ApplyGlass(d, 0, 0);
     root.Children().InsertAt(index, glass);
 
+    // Maximized windows end right above the dock, as without magnification.
+    g_keepShown = g_cfg.magnify && macdock::MagnifyHeadroom() > 0;
+    ScheduleOverWindows(true);
+
     // The Recycle Bin and the divider go above the icons.
     if (g_cfg.trash) {
         uint32_t after = 0;
@@ -10654,6 +10902,7 @@ struct Item {
     winrt::weak_ref<FrameworkElement> dot;
     float dotCenter = 0;  // across the dock, in the button
     float scale = 1, shift = 0;
+    float size = -1;  // the button's size when measured
 };
 
 std::vector<Item> g_row;
@@ -10748,25 +10997,45 @@ void BuildRow(Dock* dock) {
             item.element = winrt::make_weak(el);
             item.center = g_cfg.vertical ? slot.Y + slot.Height / 2 : slot.X + slot.Width / 2;
             item.pitch = std::max(1.0f, g_cfg.vertical ? slot.Height : slot.Width);
-            winrt::Windows::Foundation::Rect iconRect{0, 0, (float)el.ActualWidth(), (float)el.ActualHeight()};
-            if (auto icon = DescendantByName(el, L"Icon", 4)) {
-                iconRect = icon.TransformToVisual(el).TransformBounds(
-                    {0, 0, (float)icon.ActualWidth(), (float)icon.ActualHeight()});
-            }
-            item.pivot = PivotOf(iconRect);
-            if (auto dot = DescendantByName(el, L"RunningIndicator", 4)) {
-                auto r = dot.TransformToVisual(el).TransformBounds(
-                    {0, 0, (float)dot.ActualWidth(), (float)dot.ActualHeight()});
-                item.dot = winrt::make_weak(dot);
-                item.dotCenter = g_cfg.vertical ? r.X + r.Width / 2 : r.Y + r.Height / 2;
-            }
+            Item* known = nullptr;
             for (auto& o : old) {
                 if (!o.trash && o.element.get() == el) {
-                    item.scale = o.scale;
-                    item.shift = o.shift;
-                    o.element = nullptr;  // still here; don't reset it below
+                    known = &o;
                     break;
                 }
+            }
+            if (known && known->size == slot.Width + slot.Height * 4096) {
+                // Same button, same size: keep its measurements.
+                item.pivot = known->pivot;
+                item.dot = known->dot;
+                item.dotCenter = known->dotCenter;
+            } else {
+                winrt::Windows::Foundation::Rect iconRect{0, 0, (float)el.ActualWidth(),
+                                                          (float)el.ActualHeight()};
+                float x, y;
+                if (auto icon = DescendantByName(el, L"Icon", 4);
+                    icon && LayoutOffset(icon, el, x, y)) {
+                    iconRect = {x, y, (float)icon.ActualWidth(), (float)icon.ActualHeight()};
+                }
+                item.pivot = PivotOf(iconRect);
+                if (auto dot = DescendantByName(el, L"RunningIndicator", 4);
+                    dot && LayoutOffset(dot, el, x, y)) {
+                    // The dot's own sideways offset (on the left/right) is a
+                    // render transform.
+                    if (auto t = dot.RenderTransform().try_as<wxm::TranslateTransform>()) {
+                        x += (float)t.X();
+                        y += (float)t.Y();
+                    }
+                    item.dot = winrt::make_weak(dot);
+                    item.dotCenter = g_cfg.vertical ? x + (float)dot.ActualWidth() / 2
+                                                    : y + (float)dot.ActualHeight() / 2;
+                }
+            }
+            item.size = slot.Width + slot.Height * 4096;
+            if (known) {
+                item.scale = known->scale;
+                item.shift = known->shift;
+                known->element = nullptr;  // still here; don't reset it below
             }
             g_row.push_back(item);
         }
@@ -10778,8 +11047,12 @@ void BuildRow(Dock* dock) {
             Item item;
             item.trash = true;
             float size = g_cfg.trashSize;
-            auto pos = dock->trash.TransformToVisual(repeater).TransformPoint({0, 0});
-            item.center = (g_cfg.vertical ? pos.Y : pos.X) + size / 2;
+            float tx = 0, ty = 0, rx = 0, ry = 0;
+            if (auto root = dock->root.get()) {
+                LayoutOffset(dock->trash, root, tx, ty);
+                LayoutOffset(repeater, root, rx, ry);
+            }
+            item.center = (g_cfg.vertical ? ty - ry : tx - rx) + size / 2;
             item.pitch = g_cfg.trashSlot;
             item.pivot = PivotOf({0, 0, size, size});
             for (auto& o : old) {
@@ -11019,6 +11292,8 @@ void Reset() {
         }
     }
     g_docks->clear();
+    RemoveAppBars();
+    g_overWindowsPending = 0;
     StopTrashWatch();
     g_dockThread = 0;
 }
@@ -12938,6 +13213,25 @@ FrameworkElement TaskbarFrameFromOverrides(void* pThis) {
         return nullptr;
     }
     return element;
+}
+
+// Keeps the taskbar from hiding while the dock manages auto-hide (see
+// dockfx "Maximized windows end where they did before").
+using TrayUI__Hide_t = void(WINAPI*)(void* pThis);
+TrayUI__Hide_t TrayUI__Hide_Original;
+void WINAPI TrayUI__Hide_Hook(void* pThis) {
+    if (dockfx::g_keepShown && !g_unloading) {
+        if (HWND tb = dockfx::FindPrimaryTaskbar()) KillTimer(tb, 2);
+        return;
+    }
+    TrayUI__Hide_Original(pThis);
+}
+
+using CSecondaryTray__AutoHide_t = void(WINAPI*)(void* pThis, bool param1);
+CSecondaryTray__AutoHide_t CSecondaryTray__AutoHide_Original;
+void WINAPI CSecondaryTray__AutoHide_Hook(void* pThis, bool param1) {
+    if (dockfx::g_keepShown && !g_unloading) return;
+    CSecondaryTray__AutoHide_Original(pThis, param1);
 }
 
 TaskbarFrame_OnPointer_t TaskbarFrame_OnPointerMoved_Original;
@@ -15117,6 +15411,18 @@ bool HookTaskbarDllSymbols() {
             &TrayUI__StuckTrayChange_Original,
         },
         {
+            {LR"(public: void __cdecl TrayUI::_Hide(void))"},
+            &TrayUI__Hide_Original,
+            TrayUI__Hide_Hook,
+            true,
+        },
+        {
+            {LR"(private: void __cdecl CSecondaryTray::_AutoHide(bool))"},
+            &CSecondaryTray__AutoHide_Original,
+            CSecondaryTray__AutoHide_Hook,
+            true,
+        },
+        {
             {LR"(public: void __cdecl TrayUI::_HandleSettingChange(struct HWND__ *,unsigned int,unsigned __int64,__int64))"},
             &TrayUI__HandleSettingChange_Original,
             TrayUI__HandleSettingChange_Hook,
@@ -15882,6 +16188,7 @@ void Wh_ModBeforeUninit() {
     Wh_Log(L">");
 
     dockfx::g_stopping = true;
+    dockfx::RestoreAutoHide();
 
     taskbarheight::BeforeUninit();
 }
