@@ -10010,7 +10010,6 @@ void ApplyDockSettings() {
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
-#include <shellscalingapi.h>
 #include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
 
@@ -10682,11 +10681,9 @@ void UpdateAppBars() {
         ForEachTaskbarWindow([&](HWND tb) {
             HMONITOR monitor = MonitorFromWindow(tb, MONITOR_DEFAULTTONEAREST);
             MONITORINFO info{sizeof(info)};
-            UINT dpiX = 96, dpiY = 96;
-            if (!GetMonitorInfoW(monitor, &info) ||
-                FAILED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) {
-                return;
-            }
+            if (!GetMonitorInfoW(monitor, &info)) return;
+            UINT dpiX = GetDpiForWindow(tb);
+            if (!dpiX) dpiX = 96;
             RECT r = info.rcMonitor;
             int px = MulDiv(strip, dpiX, 96);
             if (edge == ABE_BOTTOM) r.top = r.bottom - px;
