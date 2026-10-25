@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.2.1
+// @version         2.2.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -10141,6 +10141,11 @@ struct Dock {
     UIElement::Drop_revoker trashDrop;
     int trashState = -2;
     float growStart = -1, growEnd = -1;  // last applied glass growth
+    // While icons are magnified the glass is laid out once at its widest and
+    // clipped to the current size, so no frame needs a layout pass.
+    bool glassExpanded = false;
+    float glassSpread = 0;
+    wuc::CompositionRoundedRectangleGeometry glassClip{nullptr};
 };
 
 [[clang::no_destroy]] std::optional<std::list<Dock>> g_docks{std::in_place};
@@ -10160,20 +10165,57 @@ Dock* FindDockByRoot(UIElement const& root) {
     return nullptr;
 }
 
-// Grows the glass past the RootGrid by `start` px before the first icon and
-// `end` px after the last one (along the dock).
-void ApplyGlass(Dock& d, float start, float end) {
-    if (!d.glass) return;
-    if (std::fabs(start - d.growStart) < 0.25f && std::fabs(end - d.growEnd) < 0.25f) return;
-    auto root = d.root.get();
-    if (!root) return;
-    d.growStart = start;
-    d.growEnd = end;
+bool IsRowDock(Dock const& d);
+
+void SetGlassMargin(Dock& d, wxc::Grid const& root, float extra) {
     auto pad = root.Padding();
     if (g_cfg.vertical) {
-        d.glass.Margin({-pad.Left, -pad.Top - start, -pad.Right, -pad.Bottom - end});
+        d.glass.Margin({-pad.Left, -pad.Top - extra, -pad.Right, -pad.Bottom - extra});
     } else {
-        d.glass.Margin({-pad.Left - start, -pad.Top, -pad.Right - end, -pad.Bottom});
+        d.glass.Margin({-pad.Left - extra, -pad.Top, -pad.Right - extra, -pad.Bottom});
+    }
+}
+
+// Grows the glass past the RootGrid by `start` px before the first icon and
+// `end` px after the last one (along the dock). Layout only changes when
+// magnification starts and ends; in between only a composition clip moves.
+void ApplyGlass(Dock& d, float start, float end) {
+    if (!d.glass) return;
+    auto root = d.root.get();
+    if (!root) return;
+    bool want = start > 0.25f || end > 0.25f || IsRowDock(d);
+    if (!want) {
+        if (d.glassExpanded || d.growStart != 0 || d.growEnd != 0) {
+            SetGlassMargin(d, root, 0);
+            wuxh::ElementCompositionPreview::GetElementVisual(d.glass).Clip(nullptr);
+            d.glassClip = nullptr;
+            d.glassExpanded = false;
+        }
+        d.growStart = d.growEnd = 0;
+        return;
+    }
+    if (!d.glassExpanded) {
+        d.glassSpread = MaxSpread() + 2;
+        SetGlassMargin(d, root, d.glassSpread);
+        auto visual = wuxh::ElementCompositionPreview::GetElementVisual(d.glass);
+        auto compositor = visual.Compositor();
+        d.glassClip = compositor.CreateRoundedRectangleGeometry();
+        float r = (float)macdock::GetPx(L"cornerRadius");
+        d.glassClip.CornerRadius({r, r});
+        visual.Clip(compositor.CreateGeometricClip(d.glassClip));
+        d.glassExpanded = true;
+        d.growStart = d.growEnd = -1;
+    }
+    if (std::fabs(start - d.growStart) < 0.1f && std::fabs(end - d.growEnd) < 0.1f) return;
+    d.growStart = start;
+    d.growEnd = end;
+    float w = (float)root.ActualWidth(), h = (float)root.ActualHeight(), m = d.glassSpread;
+    if (g_cfg.vertical) {
+        d.glassClip.Offset({0, m - start});
+        d.glassClip.Size({w, h + start + end});
+    } else {
+        d.glassClip.Offset({m - start, 0});
+        d.glassClip.Size({w + start + end, h});
     }
 }
 
@@ -10905,6 +10947,10 @@ struct Item {
 std::vector<Item> g_row;
 Dock* g_rowDock = nullptr;
 bool g_pointerOver = false;
+
+bool IsRowDock(Dock const& d) {
+    return g_pointerOver && g_rowDock == &d;
+}
 bool g_expanded = false;
 float g_pointer = 0;
 bool g_anchorStart = true;
