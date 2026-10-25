@@ -2,7 +2,7 @@
 // @id              macos-traffic-lights-right
 // @name            macOS Traffic Lights
 // @description     macOS traffic light buttons on the right of the title bar, replacing the native caption buttons – Explorer included
-// @version         2.1
+// @version         3.0
 // @author          Okan
 // @include         *
 // @exclude         dwm.exe
@@ -20,7 +20,9 @@
 # macOS Traffic Lights
 
 - Green/yellow/red buttons (maximize, minimize, close) anchored to the **right** of the title bar
-- The native caption buttons are hidden behind a surface that copies the title bar's own colors
+- The native caption buttons are removed (the window loses its system menu style, which is what makes
+  Windows draw them; Alt+Space still opens the window menu). Apps that draw their own buttons have
+  them blocked and their symbols painted over with the title bar's own colors
 - Also works with apps that draw their own title bar (Explorer, Chrome, Edge, Store apps, Office …)
 - Symbols appear on hover; inactive windows are shown gray (can be turned off)
 - Empty space next to the buttons behaves like the title bar: drag moves the window, double-click maximizes
@@ -42,6 +44,12 @@
 - hideNative: true
   $name: Hide the native caption buttons
   $description: When off, the traffic lights sit just left of the native buttons
+- clearApps: ""
+  $name: Apps with see-through title bars
+  $description: >-
+    Comma-separated .exe names (e.g. explorer.exe) whose title bar a theme has made
+    see-through and whose native button symbols it already hides. Nothing is painted over
+    the native buttons there, only the lights; the buttons stay disabled.
 */
 // ==/WindhawkModSettings==
 
@@ -53,6 +61,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -67,6 +76,7 @@ struct Settings {
     int marginRight = 12;
     bool inactiveGray = true;
     bool hideNative = true;
+    std::vector<std::wstring> clearApps;  // lower case
 } g_settings;
 
 struct Sig {
@@ -87,13 +97,34 @@ struct WinState {
     float scale = 1;
     float lightsX = 0;   // left edge of the first light, relative to the overlay
     float lightsCy = 0;  // vertical center of the lights, relative to the overlay
-    std::vector<COLORREF> bgRows;  // title bar color per overlay row
+    // What the title bar looks like under the overlay, BGRA, anchored to the overlay's right
+    // edge. Alpha 255 marks the patches over the native button glyphs; elsewhere (alpha 0) the
+    // overlay stays clear and the live title bar shows through. One pixel wide and fully
+    // opaque (a color per row) when only the strip beside the overlay could be read.
+    std::vector<DWORD> bgPx;
+    int bgW = 0, bgH = 0;
     unsigned bgVersion = 0;
+    int pollCount = 0;
+    int settle = 0;           // quick follow-up samples left until the title bar holds still
+    bool probePending = false;
+    ULONGLONG lastSample = 0;  // GetTickCount64 of the last screen copy
+    ULONGLONG sampleCost = 0;  // how long it took, in ms
     // Where the window itself reports its caption buttons (see ProbeNativeButtons),
     // in physical pixels: distance from the right window edge and from the frame
     // top. 0 when the window reports none.
     int nativeWidth = 0;
     int nativeHeight = 0;
+    int nativeLeft = 0;   // screen x where the native buttons start, from ComputeGeometry
+    int nativeCells = 3;  // how many native buttons there are
+    bool clear = false;   // see-through title bar: paint nothing over the native buttons
+    // WS_SYSMENU taken off the window, so Windows doesn't draw the native buttons at all; it's
+    // put back on detach. noButtons: the probe found no buttons left after that, so there's
+    // nothing to paint over either.
+    bool sysMenuRemoved = false;
+    bool noButtons = false;
+    // Child windows that answer for the caption buttons (apps that draw their own title bar),
+    // subclassed so their buttons stop being buttons too.
+    std::vector<HWND> buttonChildren;
     bool probing = false;
     bool fastTimer = false;
     bool inSizeMove = false;
@@ -143,6 +174,12 @@ static bool IsCandidateStyle(HWND h) {
     return true;
 }
 
+// The window's style with WS_SYSMENU as the app set it, whether or not it's been taken off.
+static LONG AppStyle(WinState* s) {
+    LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
+    return s->sysMenuRemoved ? (st | WS_SYSMENU) : st;
+}
+
 static bool IsButtonEnabled(LONG style, int b) {
     if (b == BTN_MIN) return (style & WS_MINIMIZEBOX) != 0;
     if (b == BTN_MAX) return (style & WS_MAXIMIZEBOX) != 0;
@@ -158,7 +195,7 @@ static bool ComputeGeometry(WinState* s) {
     if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
         return false;
 
-    LONG st = GetWindowLongW(h, GWL_STYLE);
+    LONG st = AppStyle(s);
     LONG ex = GetWindowLongW(h, GWL_EXSTYLE);
     if (!(st & (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX))) return false;
 
@@ -220,10 +257,14 @@ static bool ComputeGeometry(WinState* s) {
         out.left = std::min<LONG>(out.left, wr.right - s->nativeWidth);
         out.bottom = std::max<LONG>(out.bottom, frameTop + s->nativeHeight);
     }
+    s->nativeLeft = out.left;
+    s->nativeCells = cells;
     int captionH = out.bottom - out.top;
-    int m = (int)(2 * scale + 0.5f);
+    // Generous, as some apps draw a button a few pixels past where it reports it. The cover
+    // shows the real title bar, so the extra width doesn't show.
+    int m = (int)(8 * scale + 0.5f);
     out.left -= m;
-    out.bottom += m;
+    out.bottom += (int)(2 * scale + 0.5f);  // below is the app's content, often clickable
     if (out.right > fr.right) out.right = fr.right;
     if (out.top < top) out.top = top;
 
@@ -262,10 +303,15 @@ static bool IsCaptionButtonHit(LRESULT ht) {
     return ht == HTMINBUTTON || ht == HTMAXBUTTON || ht == HTCLOSE || ht == HTHELP;
 }
 
+static LRESULT CALLBACK ButtonChildSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id,
+                                                DWORD_PTR ref);
+
 // What the window answers for a screen point. Apps that draw their own title bar
 // still report their buttons here (Windows needs it for snap layouts), some from
-// a child window covering the title bar.
-static bool HitsCaptionButton(HWND h, int x, int y) {
+// a child window covering the title bar; such a child is subclassed (see
+// ButtonChildSubclassProc).
+static bool HitsCaptionButton(WinState* s, int x, int y) {
+    HWND h = s->hwnd;
     LPARAM lp = MAKELPARAM((WORD)x, (WORD)y);
     if (IsCaptionButtonHit(SendMessageW(h, WM_NCHITTEST, 0, lp))) return true;
     HWND target = h;
@@ -277,8 +323,14 @@ static bool HitsCaptionButton(HWND h, int x, int y) {
         target = child;
     }
     // Only children on this thread: a busy thread elsewhere would stall the probe.
-    return target != h && GetWindowThreadProcessId(target, nullptr) == GetCurrentThreadId() &&
-           IsCaptionButtonHit(SendMessageW(target, WM_NCHITTEST, 0, lp));
+    if (target == h || GetWindowThreadProcessId(target, nullptr) != GetCurrentThreadId() ||
+        !IsCaptionButtonHit(SendMessageW(target, WM_NCHITTEST, 0, lp)))
+        return false;
+    if (std::find(s->buttonChildren.begin(), s->buttonChildren.end(), target) ==
+            s->buttonChildren.end() &&
+        SetWindowSubclass(target, ButtonChildSubclassProc, 1, (DWORD_PTR)s))
+        s->buttonChildren.push_back(target);
+    return true;
 }
 
 // Finds where the window's own caption buttons are by asking it, along a few
@@ -310,7 +362,7 @@ static void ProbeNativeButtons(WinState* s) {
             int misses = 0;
             bool found = false;
             for (int x = wr.right - 1; x > wr.right - limit && x > wr.left; x -= step) {
-                if (HitsCaptionButton(h, x, y)) {
+                if (HitsCaptionButton(s, x, y)) {
                     found = true;
                     misses = 0;
                     if (x < left) {
@@ -326,7 +378,7 @@ static void ProbeNativeButtons(WinState* s) {
             width = wr.right - left + step;
             int bottom = frameTop;
             for (int y = frameTop; y < frameTop + (int)(80 * scale); y += 2) {
-                if (HitsCaptionButton(h, hitX, y)) bottom = y + 2;
+                if (HitsCaptionButton(s, hitX, y)) bottom = y + 2;
             }
             height = bottom - frameTop;
         }
@@ -348,25 +400,29 @@ static void ProbeNativeButtons(WinState* s) {
     s->probing = false;
 }
 
-// Copies the title bar strip just left of the overlay, one color per row. Several columns are
-// sampled and the per-channel median taken, so a stray glyph of the title text doesn't leak in.
-static void SampleBackground(WinState* s) {
-    // Same moments as the background sample: shown, resized, activated.
-    ProbeNativeButtons(s);
-    DpiGuard g;
-    if (!ComputeGeometry(s)) return;
-    const RECT& ov = s->ovRect;
-    int h = ov.bottom - ov.top;
-    const int kCols = 5, kStep = 3;
-    int w = (kCols - 1) * kStep + 1;
-    int x0 = ov.left - 2 - (w - 1);
-
-    POINT probes[3] = {{x0, ov.top + h / 2}, {ov.left - 2, ov.top + 1}, {ov.left - 2, ov.bottom - 1}};
-    for (POINT pt : probes) {
-        HWND under = WindowFromPoint(pt);
-        if (!under || GetAncestor(under, GA_ROOT) != s->hwnd) return;  // covered by another window
+// Whether another window above this one overlaps r, so the screen there isn't the title bar.
+static bool IsCovered(WinState* s, const RECT& r) {
+    for (HWND w = GetWindow(s->hwnd, GW_HWNDPREV); w; w = GetWindow(w, GW_HWNDPREV)) {
+        if (w == s->overlay || !IsWindowVisible(w)) continue;
+        LONG ex = GetWindowLongW(w, GWL_EXSTYLE);
+        if ((ex & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) == (WS_EX_LAYERED | WS_EX_TRANSPARENT))
+            continue;  // click-through overlays
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
+            continue;
+        RECT wr, x;
+        if (FAILED(DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, &wr, sizeof(wr))) &&
+            !GetWindowRect(w, &wr))
+            continue;
+        if (IntersectRect(&x, &wr, &r)) return true;
     }
+    return false;
+}
 
+// Copies a screen rectangle, top-down BGRA.
+static bool CaptureScreen(const RECT& r, std::vector<DWORD>& out) {
+    int w = r.right - r.left, h = r.bottom - r.top;
+    if (w <= 0 || h <= 0) return false;
     BITMAPINFO bi = {};
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = w;
@@ -375,42 +431,194 @@ static void SampleBackground(WinState* s) {
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
 
+    bool ok = false;
     HDC screen = GetDC(nullptr);
     HDC mem = CreateCompatibleDC(screen);
     void* bits = nullptr;
     HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (bmp && bits) {
         HGDIOBJ old = SelectObject(mem, bmp);
-        if (BitBlt(mem, 0, 0, w, h, screen, x0, ov.top, SRCCOPY)) {
+        if (BitBlt(mem, 0, 0, w, h, screen, r.left, r.top, SRCCOPY)) {
             GdiFlush();
-            const DWORD* px = (const DWORD*)bits;
-            std::vector<COLORREF> rows(h);
-            for (int y = 0; y < h; y++) {
-                int r[kCols], gr[kCols], bl[kCols];
-                for (int i = 0; i < kCols; i++) {
-                    DWORD p = px[y * w + i * kStep];
-                    r[i] = (p >> 16) & 0xFF;
-                    gr[i] = (p >> 8) & 0xFF;
-                    bl[i] = p & 0xFF;
-                }
-                std::sort(r, r + kCols);
-                std::sort(gr, gr + kCols);
-                std::sort(bl, bl + kCols);
-                rows[y] = RGB(r[kCols / 2], gr[kCols / 2], bl[kCols / 2]);
-            }
-            s->bgRows.swap(rows);
-            s->bgVersion++;
+            out.assign((const DWORD*)bits, (const DWORD*)bits + w * h);
+            ok = true;
         }
         SelectObject(mem, old);
         DeleteObject(bmp);
     }
     DeleteDC(mem);
     ReleaseDC(nullptr, screen);
+    return ok;
 }
 
-static COLORREF RowColor(WinState* s, int y) {
-    if (s->bgRows.empty()) return DefaultBg();
-    return s->bgRows[ClampInt(y, 0, (int)s->bgRows.size() - 1)];
+// One direction of RemoveGlyphs: a pixel that stands out from the median of the pixels around
+// it along a row (or a column) takes that median, and so does the faint antialiased fringe next
+// to such a pixel. Strokes much shorter than the window go, while the smooth gradients of mica
+// and acrylic stay, as does the faint acrylic noise. Only rows y0..y1 and the columns left of
+// keepRight are touched.
+static void MedianPass(std::vector<DWORD>& px, int w, int h, bool vertical, int radius, int y0,
+                       int y1, int keepRight) {
+    std::vector<DWORD> med(px);
+    std::vector<uint8_t> diff(w * h, 0);
+    std::vector<int> ch[3];
+    for (auto& v : ch) v.reserve(2 * radius + 1);
+    for (int y = y0; y < y1; y++) {
+        for (int x = 0; x < w - keepRight; x++) {
+            int pos = vertical ? y : x;
+            int lo = std::max(vertical ? y0 : 0, pos - radius);
+            int hi = std::min(vertical ? y1 - 1 : w - 1, pos + radius);
+            for (auto& v : ch) v.clear();
+            for (int i = lo; i <= hi; i++) {
+                DWORD p = vertical ? px[i * w + x] : px[y * w + i];
+                for (int k = 0; k < 3; k++) ch[k].push_back((p >> (k * 8)) & 0xFF);
+            }
+            DWORD self = px[y * w + x], m = 0;
+            int d = 0;
+            for (int k = 0; k < 3; k++) {
+                auto mid = ch[k].begin() + ch[k].size() / 2;
+                std::nth_element(ch[k].begin(), mid, ch[k].end());
+                m |= (DWORD)*mid << (k * 8);
+                d = std::max(d, abs((int)((self >> (k * 8)) & 0xFF) - *mid));
+            }
+            med[y * w + x] = m;
+            diff[y * w + x] = (uint8_t)std::min(d, 255);
+        }
+    }
+    const int kStrong = 6, kFringe = 2;
+    for (int y = y0; y < y1; y++)
+        for (int x = 0; x < w - keepRight; x++) {
+            int d = diff[y * w + x];
+            bool replace = d > kStrong;
+            for (int dy = -1; !replace && d > kFringe && dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    int yy = y + dy, xx = x + dx;
+                    if (yy >= y0 && yy < y1 && xx >= 0 && xx < w && diff[yy * w + xx] > kStrong) {
+                        replace = true;
+                        break;
+                    }
+                }
+            if (replace) px[y * w + x] = med[y * w + x];
+        }
+}
+
+// Removes the native button glyphs from a copy of the title bar. Down the columns first, which
+// takes out horizontal strokes (minimize's dash, the edges of maximize's square) whatever their
+// length; that pass leaves the top and bottom rows alone, where the window's edge and a title
+// bar's bottom separator run. Then along the rows for the vertical strokes left over. The
+// rightmost columns hold the window border and are kept as they are.
+static void RemoveGlyphs(std::vector<DWORD>& px, int w, int h, float scale) {
+    int edge = (int)(4 * scale + 0.5f);
+    int keepRight = (int)(2 * scale + 0.5f);
+    if (h - 2 * edge > 4)
+        MedianPass(px, w, h, true, (int)(8 * scale + 0.5f), edge, h - edge, keepRight);
+    MedianPass(px, w, h, false, (int)(16 * scale + 0.5f), 0, h, keepRight);
+}
+
+// The title bar strip just left of the overlay, one color per row. Several columns are
+// sampled and the per-channel median taken, so a stray glyph of the title text doesn't leak in.
+static bool CaptureBesideOverlay(const RECT& ov, std::vector<DWORD>& out) {
+    const int kCols = 5, kStep = 3;
+    int w = (kCols - 1) * kStep + 1, h = ov.bottom - ov.top;
+    RECT strip = {ov.left - 2 - (w - 1), ov.top, ov.left - 1, ov.bottom};
+    std::vector<DWORD> px;
+    if (!CaptureScreen(strip, px)) return false;
+    out.resize(h);
+    for (int y = 0; y < h; y++) {
+        DWORD p = 0;
+        for (int k = 0; k < 3; k++) {
+            int v[kCols];
+            for (int i = 0; i < kCols; i++) v[i] = (px[y * w + i * kStep] >> (k * 8)) & 0xFF;
+            std::sort(v, v + kCols);
+            p |= (DWORD)v[kCols / 2] << (k * 8);
+        }
+        out[y] = p;
+    }
+    return true;
+}
+
+// Reads what the title bar looks like under the overlay. The overlay is excluded from screen
+// capture only for the moment of the copy, so screenshots and recordings still show the lights.
+// probe: also measure the native buttons again (shown, resized, activated), not for the
+// periodic refresh. Returns whether the sample changed.
+static bool SampleBackground(WinState* s, bool probe = true) {
+    if (probe) ProbeNativeButtons(s);
+    DpiGuard g;
+    if (!ComputeGeometry(s)) return false;
+    const RECT ov = s->ovRect;
+    RECT area = {ov.left - 16, ov.top, ov.right, ov.bottom};
+    if (IsCovered(s, area)) return false;  // keep the last sample
+    s->lastSample = GetTickCount64();
+
+    std::vector<DWORD> px;
+    int w = ov.right - ov.left, h = ov.bottom - ov.top;
+    if (probe) s->noButtons = s->sysMenuRemoved && s->nativeWidth == 0;
+    if (s->clear || s->noButtons) {
+        // Nothing to cover: the overlay stays clear apart from the lights.
+        px.assign(w * h, 0);
+        if (w == s->bgW && h == s->bgH && px == s->bgPx) return false;
+        s->bgPx.swap(px);
+        s->bgW = w;
+        s->bgH = h;
+        s->bgVersion++;
+        return true;
+    }
+    bool visible = s->overlay && IsWindowVisible(s->overlay);
+    bool under = !visible || SetWindowDisplayAffinity(s->overlay, WDA_EXCLUDEFROMCAPTURE);
+    if (under) {
+        under = CaptureScreen(ov, px);
+        if (visible) SetWindowDisplayAffinity(s->overlay, WDA_NONE);
+    }
+    if (under) {
+        std::vector<DWORD> orig(px);
+        RemoveGlyphs(px, w, h, s->scale);
+        // Patch only what the glyph removal changed, and only in a box around the middle of
+        // each native button, where its symbol sits; plus a margin for the antialiased edges
+        // and for the frame the overlay can trail a dragged window by. The rest of the copy is
+        // just the title bar and doesn't need painting, so it can't go stale when the window
+        // moves over something else.
+        int grow = (int)(3 * s->scale + 0.5f);
+        int cells = std::max(1, s->nativeCells);
+        float cellW = (float)(ov.right - s->nativeLeft) / cells;
+        int boxW = (int)std::min(cellW * 0.6f, 24 * s->scale), boxH = (int)(20 * s->scale);
+        int boxTop = (int)(s->lightsCy - boxH / 2.0f);
+        std::vector<uint8_t> changed(w * h, 0);
+        for (int i = 0; i < cells; i++) {
+            int cx = (int)(s->nativeLeft - ov.left + (i + 0.5f) * cellW);
+            for (int y = std::max(0, boxTop); y < std::min(h, boxTop + boxH); y++)
+                for (int x = std::max(0, cx - boxW / 2); x < std::min(w, cx + boxW / 2); x++)
+                    changed[y * w + x] = ((orig[y * w + x] ^ px[y * w + x]) & 0xFFFFFF) != 0;
+        }
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                bool patch = false;
+                for (int dy = -grow; dy <= grow && !patch; dy++)
+                    for (int dx = -grow; dx <= grow; dx++) {
+                        int yy = y + dy, xx = x + dx;
+                        if (yy >= 0 && yy < h && xx >= 0 && xx < w && changed[yy * w + xx]) {
+                            patch = true;
+                            break;
+                        }
+                    }
+                px[y * w + x] = (px[y * w + x] & 0xFFFFFF) | (patch ? 0xFF000000u : 0);
+            }
+    } else {
+        if (!CaptureBesideOverlay(ov, px)) return false;
+        for (auto& p : px) p |= 0xFF000000u;
+        w = 1;
+    }
+    s->sampleCost = GetTickCount64() - s->lastSample;
+    if (w == s->bgW && h == s->bgH && px == s->bgPx) return false;
+    s->bgPx.swap(px);
+    s->bgW = w;
+    s->bgH = h;
+    s->bgVersion++;
+    return true;
+}
+
+static COLORREF BgColor(WinState* s, int x, int y) {
+    if (s->bgPx.empty()) return DefaultBg();
+    DWORD p = s->bgPx[ClampInt(y, 0, s->bgH - 1) * s->bgW + ClampInt(x, 0, s->bgW - 1)];
+    return RGB((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
 }
 
 static int HitSlot(WinState* s, int x, int y) {
@@ -469,14 +677,25 @@ static void DrawLine(Canvas& c, float ax, float ay, float bx, float by, float hw
         }
 }
 
-static void FillRows(Canvas& c, WinState* s) {
-    COLORREF fallback = s->bgRows.empty() ? DefaultBg() : 0;
-    for (int y = 0; y < c.h; y++) {
-        COLORREF bg = s->bgRows.empty() ? fallback : RowColor(s, y);
+// The sample is anchored to the right edge, so it still lines up while a resize has made the
+// overlay wider or narrower than when it was taken. Outside the glyph patches the overlay is
+// nearly clear: alpha 1 still takes the mouse, so the native buttons below stay unreachable.
+static void FillBackground(Canvas& c, WinState* s) {
+    if (s->bgPx.empty()) {
+        COLORREF bg = DefaultBg();
         DWORD px = 0xFF000000u | ((DWORD)GetRValue(bg) << 16) | ((DWORD)GetGValue(bg) << 8) |
                    GetBValue(bg);
+        std::fill(c.px, c.px + c.w * c.h, px);
+        return;
+    }
+    int dx = s->bgW - c.w;
+    for (int y = 0; y < c.h; y++) {
+        const DWORD* src = s->bgPx.data() + ClampInt(y, 0, s->bgH - 1) * s->bgW;
         DWORD* row = c.px + y * c.w;
-        for (int x = 0; x < c.w; x++) row[x] = px;
+        for (int x = 0; x < c.w; x++) {
+            DWORD p = src[ClampInt(x + dx, 0, s->bgW - 1)];
+            row[x] = (p >> 24) ? (0xFF000000u | p) : 0x01000000u;
+        }
     }
 }
 
@@ -508,7 +727,7 @@ static void DrawOverlay(Canvas& c, WinState* s, const Sig& sg) {
     static const COLORREF border[3] = {RGB(224, 68, 62), RGB(222, 161, 35), RGB(30, 170, 50)};
     static const COLORREF glyph[3]  = {RGB(77, 0, 0), RGB(153, 87, 0), RGB(0, 100, 0)};
 
-    FillRows(c, s);
+    FillBackground(c, s);
     if (IsWin11() && !sg.zoomed && sg.ov.right >= s->frame.right - 1 &&
         sg.ov.top <= s->frame.top + 1) {
         float R = 8 * s->scale;
@@ -519,7 +738,8 @@ static void DrawOverlay(Canvas& c, WinState* s, const Sig& sg) {
     float gap = sg.spacing * s->scale;
     float r = d / 2;
     float cy = sg.lightsCy;
-    bool lightBg = Luma(RowColor(s, (int)cy)) > 128;
+    int bgX = (int)(sg.lightsX + 1.5f * d + gap) + s->bgW - c.w;
+    bool lightBg = Luma(BgColor(s, bgX, (int)cy)) > 128;
 
     for (int i = 0; i < 3; i++) {
         int b = kOrder[i];
@@ -639,8 +859,14 @@ static void Render(WinState* s, bool force = false) {
     s->shown = true;
 }
 
-static void ScheduleSample(WinState* s, UINT ms) {
-    if (s->overlay) SetTimer(s->overlay, TIMER_SAMPLE, ms, nullptr);
+// Samples again after ms, then every 80 ms while the sample keeps changing: right after an
+// event the screen can still show an animation (a window opening, mica fading between active
+// and inactive) instead of the settled title bar.
+static void ScheduleSample(WinState* s, UINT ms, bool probe = true) {
+    if (!s->overlay) return;
+    s->settle = 12;
+    s->probePending = s->probePending || probe;
+    SetTimer(s->overlay, TIMER_SAMPLE, ms, nullptr);
 }
 
 static void DoAction(WinState* s, int slot) {
@@ -708,9 +934,18 @@ static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!s) return 0;
             if (w == TIMER_SAMPLE) {
                 KillTimer(h, TIMER_SAMPLE);
-                SampleBackground(s);
+                bool probe = s->probePending;
+                s->probePending = false;
+                bool changed = SampleBackground(s, probe);
                 Render(s, true);
+                if (changed && s->settle-- > 0) SetTimer(h, TIMER_SAMPLE, 80, nullptr);
             } else {
+                // Acrylic follows whatever is behind the window, and a window that was covered
+                // has no event for being uncovered, so the sample is refreshed every few
+                // seconds. It only redraws when it changed.
+                if (w == TIMER_POLL && ++s->pollCount % 3 == 0 && s->shown && !s->inSizeMove &&
+                    SampleBackground(s, false))
+                    ScheduleSample(s, 250, false);
                 Render(s);
             }
             return 0;
@@ -728,7 +963,77 @@ static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 // ---------------------------------------------------------------- attach / detach
 
+static bool IsClearApp() {
+    if (g_settings.clearApps.empty()) return false;
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return false;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    std::wstring exe = name ? name + 1 : path;
+    for (auto& c : exe) c = towlower(c);
+    return std::find(g_settings.clearApps.begin(), g_settings.clearApps.end(), exe) !=
+           g_settings.clearApps.end();
+}
+
+// Hit tests that land on a native caption button of the child pass through to the window
+// itself, which turns them into title bar hits (see WM_NCHITTEST in WindowSubclassProc): no
+// hover highlight, no click. HTCAPTION in a child would drag the child, not the window.
+static LRESULT CALLBACK ButtonChildSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id,
+                                                DWORD_PTR ref) {
+    WinState* s = (WinState*)ref;
+    if (m == WM_NCHITTEST) {
+        LRESULT r = DefSubclassProc(h, m, w, l);
+        if (!s->probing && g_settings.hideNative && s->overlay && IsCaptionButtonHit(r))
+            return HTTRANSPARENT;
+        return r;
+    }
+    if (m == WM_NCDESTROY) {
+        RemoveWindowSubclass(h, ButtonChildSubclassProc, id);
+        auto& v = s->buttonChildren;
+        v.erase(std::remove(v.begin(), v.end(), h), v.end());
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
+// Without WS_SYSMENU Windows draws no caption buttons (nor the window icon), so there's
+// nothing left to hover, click or flash, while minimize and maximize keep working through
+// their own styles (taskbar, Win+arrows, snapping) and Alt+F4 still closes.
+static void RemoveSysMenu(WinState* s) {
+    LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
+    if (!g_settings.hideNative || !(st & WS_SYSMENU)) return;
+    s->sysMenuRemoved = true;
+    SetWindowLongW(s->hwnd, GWL_STYLE, st & ~WS_SYSMENU);
+    SetWindowPos(s->hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+static void RestoreSysMenu(WinState* s) {
+    if (!s->sysMenuRemoved) return;
+    s->sysMenuRemoved = false;
+    if (!IsWindow(s->hwnd)) return;
+    SetWindowLongW(s->hwnd, GWL_STYLE, GetWindowLongW(s->hwnd, GWL_STYLE) | WS_SYSMENU);
+    SetWindowPos(s->hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+// The window menu, which Windows only opens by itself for windows with WS_SYSMENU.
+static void ShowWindowMenu(WinState* s, int x, int y) {
+    HMENU menu = GetSystemMenu(s->hwnd, FALSE);
+    if (!menu) return;
+    SetForegroundWindow(s->hwnd);
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, s->hwnd, nullptr);
+    if (cmd) PostMessageW(s->hwnd, WM_SYSCOMMAND, cmd, 0);
+}
+
+static void ReleaseButtonChildren(WinState* s) {
+    for (HWND c : s->buttonChildren)
+        if (IsWindow(c)) RemoveWindowSubclass(c, ButtonChildSubclassProc, 1);
+    s->buttonChildren.clear();
+}
+
 static void Detach(WinState* s) {
+    ReleaseButtonChildren(s);
+    RestoreSysMenu(s);
     if (s->overlay) DestroyWindow(s->overlay);
     s->overlay = nullptr;
 }
@@ -745,9 +1050,12 @@ static void Attach(WinState* s) {
         Wh_Log(L"Failed to create overlay: %u", GetLastError());
         return;
     }
+    s->clear = IsClearApp();
+    RemoveSysMenu(s);
     SetTimer(s->overlay, TIMER_POLL, 1000, nullptr);
     SampleBackground(s);
     Render(s, true);
+    ScheduleSample(s, 250, false);
 }
 
 static void OnCursorActivity(WinState* s) {
@@ -765,8 +1073,12 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
 
     if (m == g_msgAttach) {
         if (s->overlay) {
+            s->clear = IsClearApp();  // settings may have changed
+            if (g_settings.hideNative) RemoveSysMenu(s);
+            else RestoreSysMenu(s);
             SampleBackground(s);
             Render(s, true);
+            ScheduleSample(s, 250, false);
         } else {
             Attach(s);
         }
@@ -784,9 +1096,18 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
             if (!s->overlay) {
                 Attach(s);
             } else {
+                // While dragged, a see-through title bar changes with every step, so the cover
+                // follows it, at most every 60 ms and never more than a fifth of the time, as
+                // copies cost more on high-DPI screens (no probe: the buttons don't change).
+                if (s->inSizeMove && !(wp->flags & SWP_NOMOVE) &&
+                    GetTickCount64() - s->lastSample >= std::max<ULONGLONG>(60, 5 * s->sampleCost))
+                    SampleBackground(s, false);
                 Render(s);
-                if ((!(wp->flags & SWP_NOSIZE) && !s->inSizeMove) || (wp->flags & SWP_SHOWWINDOW))
-                    ScheduleSample(s, 300);
+                // Moves count too: mica shows the wallpaper behind the window.
+                if (((wp->flags & (SWP_NOSIZE | SWP_NOMOVE)) != (SWP_NOSIZE | SWP_NOMOVE) &&
+                     !s->inSizeMove) ||
+                    (wp->flags & SWP_SHOWWINDOW))
+                    ScheduleSample(s, 100);
             }
             return r;
         }
@@ -795,10 +1116,27 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
             break;
         case WM_EXITSIZEMOVE:
             s->inSizeMove = false;
-            ScheduleSample(s, 50);
+            ScheduleSample(s, 20, false);
             break;
         case WM_SHOWWINDOW:
             if (!w) HideAll(s);
+            break;
+        case WM_STYLECHANGED:
+            // The app put WS_SYSMENU back (some reset their whole style): take it off again.
+            if (w == (WPARAM)GWL_STYLE && s->overlay && g_settings.hideNative && !g_unloading &&
+                (((STYLESTRUCT*)l)->styleNew & WS_SYSMENU)) {
+                s->sysMenuRemoved = false;
+                PostMessageW(h, g_msgAttach, 0, 0);
+            }
+            break;
+        case WM_SYSCOMMAND:
+            // Alt+Space
+            if (s->sysMenuRemoved && (w & 0xFFF0) == SC_KEYMENU && l == VK_SPACE) {
+                RECT r;
+                GetWindowRect(h, &r);
+                ShowWindowMenu(s, r.left + 8, r.top + 32);
+                return 0;
+            }
             break;
         case WM_NCACTIVATE:
         case WM_ACTIVATEAPP: {
@@ -838,6 +1176,7 @@ static LRESULT CALLBACK WindowSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l, D
                 std::lock_guard<std::mutex> lock(g_mutex);
                 g_windows.erase(h);
             }
+            ReleaseButtonChildren(s);
             if (s->overlay && IsWindow(s->overlay)) DestroyWindow(s->overlay);
             LRESULT r = DefSubclassProc(h, m, w, l);
             delete s;
@@ -900,6 +1239,20 @@ static void LoadSettings() {
     g_settings.marginRight = ClampInt(Wh_GetIntSetting(L"marginRight"), 0, 100);
     g_settings.inactiveGray = Wh_GetIntSetting(L"inactiveGray") != 0;
     g_settings.hideNative = Wh_GetIntSetting(L"hideNative") != 0;
+    g_settings.clearApps.clear();
+    PCWSTR list = Wh_GetStringSetting(L"clearApps");
+    std::wstring cur;
+    for (const wchar_t* p = list ? list : L"";; p++) {
+        if (!*p || *p == L',' || *p == L';') {
+            size_t a = cur.find_first_not_of(L" \t"), b = cur.find_last_not_of(L" \t");
+            if (a != std::wstring::npos) g_settings.clearApps.push_back(cur.substr(a, b - a + 1));
+            cur.clear();
+            if (!*p) break;
+        } else {
+            cur += (wchar_t)towlower(*p);
+        }
+    }
+    Wh_FreeStringSetting(list);
 }
 
 static std::vector<HWND> SnapshotWindows() {
