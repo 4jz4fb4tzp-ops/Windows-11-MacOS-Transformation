@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.3.1
+// @version         2.3.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -10192,7 +10192,7 @@ winrt::Windows::UI::Color ParseArgb(std::wstring const& text, winrt::Windows::UI
 
 std::wstring Num(float v) {
     WCHAR b[32];
-    swprintf(b, 32, v < 0 ? L"(%.3f)" : L"%.3f", v);
+    swprintf(b, 32, v < 0 ? L"(%.2f)" : L"%.2f", v);
     return b;
 }
 
@@ -10226,12 +10226,16 @@ void PlaceGlass(Dock& d, std::wstring const& total, std::wstring const& start = 
             offset = L"Vector2(" + Num(m + inset) + L" - (" + start + L"), " + Num(inset) + L")";
             size = L"Vector2(" + Num(w - 2 * inset) + L" + (" + total + L"), " + Num(h - 2 * inset) + L")";
         }
-        auto e1 = comp.CreateExpressionAnimation(offset);
-        e1.SetReferenceParameter(L"p", d.props);
-        geo.StartAnimation(L"Offset", e1);
-        auto e2 = comp.CreateExpressionAnimation(size);
-        e2.SetReferenceParameter(L"p", d.props);
-        geo.StartAnimation(L"Size", e2);
+        try {
+            auto e1 = comp.CreateExpressionAnimation(offset);
+            e1.SetReferenceParameter(L"p", d.props);
+            geo.StartAnimation(L"Offset", e1);
+            auto e2 = comp.CreateExpressionAnimation(size);
+            e2.SetReferenceParameter(L"p", d.props);
+            geo.StartAnimation(L"Size", e2);
+        } catch (...) {
+            Wh_Log(L"Glass expression failed: 0x%08X", winrt::to_hresult());
+        }
     }
 }
 
@@ -11137,68 +11141,81 @@ void RebuildRow(Dock& d) {
         return;
     }
 
-    // k_j: 1 under the pointer, 0 at the range's edge (cosine falloff).
+    // k_j: 1 under the pointer, 0 from the range's edge on (cosine falloff):
+    //   0.5 + 0.5 * cos(clamp(pointer - c, -R, R) * pi / R)
+    // e_j = the icon's growth at full magnification = (scale - 1) * pitch * k_j.
+    // Everything below is a single sum over the icons, each term once, which
+    // keeps the expressions small enough for the compositor.
     float grow = g_cfg.maxScale - 1.0f, radius = g_cfg.radius;
     float freq = 3.14159265f / radius;
-    std::vector<std::wstring> k, ext;
+    std::wstring r = Num(radius);
+    std::vector<std::wstring> k, e;
     for (auto& item : d.row) {
-        std::wstring c = Num(item.center);
-        std::wstring kj = L"((Abs(p.Pointer - " + c + L") < " + Num(radius) +
-                          L") ? ((Cos((p.Pointer - " + c + L") * " + Num(freq) +
-                          L") + 1) * 0.5) : 0)";
+        std::wstring kj = L"(0.5+0.5*Cos(Clamp(p.Pointer-" + Num(item.center) + L",-" + r + L"," +
+                          r + L")*" + Num(freq) + L"))";
         k.push_back(kj);
-        ext.push_back(L"(" + Num(grow * item.pitch) + L" * p.Amount * " + kj + L")");
+        e.push_back(Num(grow * item.pitch) + L"*" + kj);
     }
-    auto sum = [&](size_t from, size_t to) {  // ext[from..to)
+    auto sum = [&](size_t from, size_t to) {  // e[from..to)
         std::wstring out;
-        for (size_t j = from; j < to; j++) out += (out.empty() ? L"" : L" + ") + ext[j];
-        return out.empty() ? std::wstring(L"0") : out;
+        for (size_t j = from; j < to; j++) out += (out.empty() ? L"" : L"+") + e[j];
+        return out.empty() ? std::wstring(L"0") : L"(" + out + L")";
     };
-    std::wstring total = sum(0, ext.size());
-    // How far the row is pulled back toward the start. As on a Mac, the ends
-    // sit where they'd be if the dock had grown evenly to its widest so far
-    // ("Half" = half of that), and the end away from the pointer's half stays
-    // put ("AnchorStart"). Scaled by Amount, so fading keeps the shape.
-    std::wstring growStart = L"(p.AnchorStart * p.Half * p.Amount + (1 - p.AnchorStart) * ((" +
-                             total + L") - p.Half * p.Amount))";
+    std::wstring all = sum(0, e.size());
+    // How far the row is pulled back toward the start (G). As on a Mac, the
+    // ends sit where they'd be if the dock had grown evenly to its widest so
+    // far (H = "Half" of that), and the end away from the pointer's half stays
+    // put (A = "AnchorStart"):  G = A*H + (1-A)*(sum - H), times Amount.
+    // An icon's shift is  (before + e_i/2) - G, which comes down to
+    //   Amount * (A*before + (A-0.5)*e_i + (A-1)*after + (1-2A)*H).
+    std::wstring total = L"p.Amount*" + all;
+    std::wstring growStart =
+        L"p.Amount*((1-p.AnchorStart)*" + all + L"+(2*p.AnchorStart-1)*p.Half)";
     auto comp = d.props.Compositor();
     auto start = [&](wuc::CompositionObject const& target, PCWSTR prop, std::wstring const& text) {
-        auto e = comp.CreateExpressionAnimation(text);
-        e.SetReferenceParameter(L"p", d.props);
-        target.StartAnimation(prop, e);
+        try {
+            auto anim = comp.CreateExpressionAnimation(text);
+            anim.SetReferenceParameter(L"p", d.props);
+            target.StartAnimation(prop, anim);
+        } catch (...) {
+            Wh_Log(L"Expression failed (%zu chars): 0x%08X", text.size(), winrt::to_hresult());
+        }
     };
 
     for (size_t i = 0; i < d.row.size(); i++) {
         auto& item = d.row[i];
         auto el = item.element.get();
         if (!el) continue;
-        std::wstring scale = L"(1 + " + Num(grow) + L" * p.Amount * " + k[i] + L")";
-        std::wstring shift =
-            L"(" + sum(0, i) + L") + 0.5 * " + ext[i] + L" - " + growStart;
+        std::wstring scale = L"(1+" + Num(grow) + L"*p.Amount*" + k[i] + L")";
+        std::wstring shift = L"p.Amount*(p.AnchorStart*" + sum(0, i) + L"+(p.AnchorStart-0.5)*" +
+                             e[i] + L"+(p.AnchorStart-1)*" + sum(i + 1, e.size()) +
+                             L"+(1-2*p.AnchorStart)*p.Half)";
         auto v = wuxh::ElementCompositionPreview::GetElementVisual(el);
         wuxh::ElementCompositionPreview::SetIsTranslationEnabled(el, true);
         v.CenterPoint({item.pivot.x, item.pivot.y, 0});
-        start(v, L"Scale", L"Vector3(" + scale + L", " + scale + L", 1)");
+        start(v, L"Scale", L"Vector3(" + scale + L"," + scale + L",1)");
         start(v, L"Translation",
-              g_cfg.vertical ? L"Vector3(0, " + shift + L", 0)" : L"Vector3(" + shift + L", 0, 0)");
+              g_cfg.vertical ? L"Vector3(0," + shift + L",0)" : L"Vector3(" + shift + L",0,0)");
         if (item.trash && d.divider) {
-            // The divider sits in the gap just before the Recycle Bin.
-            std::wstring gap = L"(" + sum(0, i) + L") - " + growStart;
+            // The divider sits in the gap just before the Recycle Bin:
+            // before - G = Amount * (A*before + (A-1)*rest + (1-2A)*H).
+            std::wstring gap = L"p.Amount*(p.AnchorStart*" + sum(0, i) + L"+(p.AnchorStart-1)*" +
+                               sum(i, e.size()) + L"+(1-2*p.AnchorStart)*p.Half)";
             wuxh::ElementCompositionPreview::SetIsTranslationEnabled(d.divider, true);
             start(wuxh::ElementCompositionPreview::GetElementVisual(d.divider), L"Translation",
-                  g_cfg.vertical ? L"Vector3(0, " + gap + L", 0)" : L"Vector3(" + gap + L", 0, 0)");
+                  g_cfg.vertical ? L"Vector3(0," + gap + L",0)" : L"Vector3(" + gap + L",0,0)");
         }
         // The dot keeps its size and its place across the dock.
         if (auto dot = item.dot.get()) {
             auto dv = wuxh::ElementCompositionPreview::GetElementVisual(dot);
             wuxh::ElementCompositionPreview::SetIsTranslationEnabled(dot, true);
             dv.CenterPoint({(float)dot.ActualWidth() / 2, (float)dot.ActualHeight() / 2, 0});
-            start(dv, L"Scale", L"Vector3(1 / " + scale + L", 1 / " + scale + L", 1)");
+            start(dv, L"Scale", L"Vector3(1/" + scale + L",1/" + scale + L",1)");
             float pv = g_cfg.vertical ? item.pivot.x : item.pivot.y;
-            std::wstring t = L"(" + Num(item.dotCenter - pv) + L" / " + scale + L" + " +
+            std::wstring t = L"(" + Num(item.dotCenter - pv) + L"/" + scale + L"+" +
                              Num(pv - item.dotCenter) + L")";
             start(dv, L"Translation",
-                  g_cfg.vertical ? L"Vector3(" + t + L", 0, 0)" : L"Vector3(0, " + t + L", 0)");
+                  g_cfg.vertical ? L"Vector3(" + t + L",0,0)" : L"Vector3(0," + t + L",0)");
         }
     }
     PlaceGlass(d, total, growStart);
