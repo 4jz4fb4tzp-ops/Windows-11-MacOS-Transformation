@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.1.0
+// @version         2.2.0
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -71,6 +71,9 @@ Colors use the `#AARRGGBB` format (AA = opacity).
 Based on the *Windows 11 Taskbar Styler* and *Taskbar height and icon size*
 mods by m417z (GPL v3), including the `WindhawkBlur` brush, which is based on
 code from the **TranslucentTB** project.
+
+The magnification and the Recycle Bin are adapted from the *MacOS Style Dock*
+mod by Zach Vaughn (GPL v3).
 */
 // ==/WindhawkModReadme==
 
@@ -152,6 +155,26 @@ code from the **TranslucentTB** project.
   $name: Indicator – background app color
 - dotAttentionColor: "#000000"
   $name: Indicator – attention color
+- magnification: true
+  $name: Magnification
+  $description: Icons grow under the pointer and push the others aside, like on a Mac.
+- magnificationScale: 150
+  $name: Magnification – size (%)
+  $description: 100-200. How big the icon under the pointer gets.
+- magnificationRange: 2
+  $name: Magnification – range (icons)
+  $description: How many icons on each side of the pointer grow too (1-8).
+- magnificationSpeed: 100
+  $name: Magnification – animation (ms)
+  $description: 0 = instant.
+- showTrash: true
+  $name: Recycle Bin in the dock
+  $description: >-
+    At the end of the dock, full or empty. Click opens it, drop files on it to
+    delete them, right-click to empty it. Uses "trash (empty).png" and
+    "trash (full).png" from the icon folder of the active icon set.
+- trashDivider: true
+  $name: Divider before the Recycle Bin
 - hideStart: true
   $name: Hide Start button
 - hideTray: true
@@ -538,6 +561,10 @@ bool VisualTreeWatcher::ReleaseDiagnosticsReference(InstanceHandle handle)
     return weakElement && !weakElement.get();
 }
 
+namespace dockfx {
+void NoteElement(winrt::Windows::UI::Xaml::FrameworkElement const& element);
+}
+
 HRESULT VisualTreeWatcher::OnVisualTreeChange(ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) try
 {
     Wh_Log(L"========================================");
@@ -586,6 +613,7 @@ HRESULT VisualTreeWatcher::OnVisualTreeChange(ParentChildRelation relation, Visu
                 {
                     ApplyCustomizations(elementId, frameworkElement, element.Type);
                 }
+                dockfx::NoteElement(frameworkElement);
             }
             else
             {
@@ -7245,6 +7273,16 @@ bool IsTaskbarTopLevelWindow(HWND hWnd) {
 // Click-through taskbar: clip the top-level taskbar window to the union of the
 // TaskbarFrame and SystemTrayFrame rects so the empty areas become both
 // invisible and click-through.
+namespace dockfx {
+bool RegionExpanded();
+float MaxSpread();
+}
+namespace macdock {
+extern std::atomic<int> g_cachedEdge;
+bool IsVerticalEdge(UINT edge);
+int MagnifyHeadroom();
+}
+
 void UpdateClickThroughRegion(ClickThroughTaskbarState& state) {
     auto taskbarFrame = state.taskbarFrame.get();
     if (!taskbarFrame) {
@@ -7344,6 +7382,8 @@ void UpdateClickThroughRegion(ClickThroughTaskbarState& state) {
     std::vector<long long> signature;
     signature.push_back(reinterpret_cast<long long>(topLevelWnd));
     signature.push_back(QuantizeLayoutSize(scale * 100));
+    bool magnifyExpanded = dockfx::RegionExpanded();
+    signature.push_back(magnifyExpanded);
     appendRect(signature, taskbarFrameRect);
     appendRect(signature, systemTrayFrameRect);
 
@@ -7409,6 +7449,34 @@ void UpdateClickThroughRegion(ClickThroughTaskbarState& state) {
     };
 
     RECT tf = toWindowRect(*taskbarFrameRect);
+
+    // Magnification: while icons are magnified, the region also covers where
+    // they reach past the dock's ends. Otherwise the room above the dock kept
+    // for them is left out, so clicks there go to the windows behind.
+    if (int headroom = macdock::MagnifyHeadroom()) {
+        UINT edge = macdock::g_cachedEdge;
+        bool vertical = macdock::IsVerticalEdge(edge);
+        if (magnifyExpanded) {
+            int grow = (int)std::lround(dockfx::MaxSpread() * scale);
+            if (vertical) {
+                tf.top = std::max(0, (int)tf.top - grow);
+                tf.bottom = std::min(tlHeight, (int)tf.bottom + grow);
+            } else {
+                tf.left = std::max(0, (int)tf.left - grow);
+                tf.right = std::min(tlWidth, (int)tf.right + grow);
+            }
+        } else {
+            int cut = (int)std::lround(headroom * scale);
+            if (!vertical) {
+                tf.top = std::min((int)tf.bottom, (int)tf.top + cut);
+            } else if (edge == ABE_RIGHT) {
+                tf.left = std::min((int)tf.right, (int)tf.left + cut);
+            } else {
+                tf.right = std::max((int)tf.left, (int)tf.right - cut);
+            }
+        }
+    }
+
     HRGN rgn = CreateRectRgn(tf.left, tf.top, tf.right, tf.bottom);
     if (!rgn) {
         Wh_Log(L"CreateRectRgn failed");
@@ -9130,7 +9198,9 @@ static const wchar_t* const kProfileIntKeys[] = {
     L"cornerRadius", L"paddingX",          L"dockBottom",    L"blurAmount",
     L"buttonWidth",  L"iconSize",          L"nativeIconSize", L"iconOffsetY",
     L"dotSize",      L"dotOffset",         L"dotOffsetX",    L"hideStart",
-    L"hideTray",     L"hideHover",         L"clickThroughTaskbar"};
+    L"hideTray",     L"hideHover",         L"clickThroughTaskbar", L"magnification",
+    L"magnificationScale", L"magnificationRange", L"magnificationSpeed", L"showTrash",
+    L"trashDivider"};
 static const wchar_t* const kProfileStrKeys[] = {
     L"appearance",     L"tintColor",        L"edgeColor",
     L"darkTintColor",  L"darkEdgeColor",    L"dotActiveColor",
@@ -9489,6 +9559,46 @@ int GetPx(const std::wstring& key) {
     return MulDiv(GetInt(key), GetScale(), 100);
 }
 
+// ---- Magnification and Recycle Bin (see namespace dockfx) ----
+
+bool MagnifyOn() {
+    return GetInt(L"magnification") != 0 && GetInt(L"magnificationScale") > 100;
+}
+
+int MagnifyPercent() {
+    return std::clamp(GetInt(L"magnificationScale"), 100, 200);
+}
+
+// Room the taskbar keeps above the dock (or beside it on the left/right) for
+// magnified icons, in scaled pixels.
+int MagnifyHeadroom() {
+    if (!MagnifyOn()) return 0;
+    int icon = std::max(GetPx(L"iconSize"), GetPx(L"nativeIconSize"));
+    return (int)std::ceil(icon * (MagnifyPercent() - 100) / 100.0) + 2;
+}
+
+bool TrashOn() {
+    return GetInt(L"showTrash") != 0;
+}
+
+bool TrashDividerOn() {
+    return TrashOn() && GetInt(L"trashDivider") != 0;
+}
+
+int TrashSlot() {
+    return std::max(1, GetPx(L"buttonWidth"));
+}
+
+int TrashDividerSpace() {
+    if (!TrashDividerOn()) return MulDiv(4, GetScale(), 100);
+    return (int)std::lround(GetPx(L"iconSize") * 0.35);
+}
+
+// Room after the last app for the divider and the Recycle Bin.
+int TrashSpace() {
+    return TrashOn() ? TrashDividerSpace() + TrashSlot() : 0;
+}
+
 int GetTaskbarThickness() {
     int h = GetInt(L"taskbarHeight");
     if (GetInt(L"autoTaskbarHeight")) {
@@ -9496,7 +9606,7 @@ int GetTaskbarThickness() {
         h = GetInt(L"dockHeight") + GetInt(L"dockBottom") + 2;
     }
     if (h <= 0) h = 48;
-    return MulDiv(h, GetScale(), 100);
+    return MulDiv(h, GetScale(), 100) + MagnifyHeadroom();
 }
 
 std::wstring Trim(std::wstring_view s) {
@@ -9637,20 +9747,25 @@ void ApplyDockSettings() {
     // On secondary / smaller monitors Windows can give the TaskbarFrame more
     // width than the icons need. Centering RootGrid makes it shrink to its
     // content, so the glass background is only as wide as the icons.
-    std::vector<std::wstring> rootStyles{
-        Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
-            blurAmount, tintColor.c_str()),
-        Fmt(L"CornerRadius=%d", cornerRadius),
-        L"BorderThickness=1",
-        Fmt(L"BorderBrush:=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\">"
-            L"<GradientStop Color=\"%s\" Offset=\"0\" />"
-            L"<GradientStop Color=\"#15FFFFFF\" Offset=\"0.5\" />"
-            L"<GradientStop Color=\"#40FFFFFF\" Offset=\"1\" />"
-            L"</LinearGradientBrush>",
-            edgeColor.c_str())};
+    // The glass itself is a Border the dock adds to the RootGrid (see
+    // dockfx::SetupDock), so it can grow while icons are magnified.
+    Rule(L"Taskbar.TaskbarFrame#TaskbarFrame > Grid#RootGrid > Border#MacDockGlass",
+         {Fmt(L"Background:=<WindhawkBlur BlurAmount=\"%d\" TintColor=\"%s\" />",
+              blurAmount, tintColor.c_str()),
+          Fmt(L"CornerRadius=%d", cornerRadius), L"BorderThickness=1",
+          Fmt(L"BorderBrush:=<LinearGradientBrush StartPoint=\"0,0\" EndPoint=\"0,1\">"
+              L"<GradientStop Color=\"%s\" Offset=\"0\" />"
+              L"<GradientStop Color=\"#15FFFFFF\" Offset=\"0.5\" />"
+              L"<GradientStop Color=\"#40FFFFFF\" Offset=\"1\" />"
+              L"</LinearGradientBrush>",
+              edgeColor.c_str())});
+    // Transparent rather than none, so clicks on the dock's ends still land.
+    std::vector<std::wstring> rootStyles{L"Background=Transparent"};
+    // Room after the last app for the Recycle Bin and its divider.
+    int trashSpace = TrashSpace();
     if (!vertical) {
         rootStyles.push_back(L"HorizontalAlignment=Center");
-        rootStyles.push_back(Fmt(L"Padding=%d,0,%d,0", paddingX, paddingX));
+        rootStyles.push_back(Fmt(L"Padding=%d,0,%d,0", paddingX, paddingX + trashSpace));
         rootStyles.push_back(Fmt(L"Height=%d", dockHeight));
         // Sit at the bottom of the taskbar, lifted by the bottom distance.
         rootStyles.push_back(L"VerticalAlignment=Bottom");
@@ -9663,7 +9778,7 @@ void ApplyDockSettings() {
         rootStyles.push_back(rightEdge ? L"HorizontalAlignment=Right"
                                        : L"HorizontalAlignment=Left");
         rootStyles.push_back(Fmt(L"Width=%d", dockHeight));
-        rootStyles.push_back(Fmt(L"Padding=0,%d,0,%d", paddingX, paddingX));
+        rootStyles.push_back(Fmt(L"Padding=0,%d,0,%d", paddingX, paddingX + trashSpace));
         rootStyles.push_back(rightEdge ? Fmt(L"Margin=0,0,%d,0", dockBottom)
                                        : Fmt(L"Margin=%d,0,0,0", dockBottom));
     }
@@ -9774,6 +9889,12 @@ void ApplyDockSettings() {
              {L"Visibility=Collapsed"});
     }
 
+    // The Recycle Bin is built in: hide the old pinned Trash shortcut.
+    if (TrashOn()) {
+        Rule(L"Taskbar.TaskListButton[AutomationProperties.AutomationId=Appid: MacDock.Trash]",
+             {L"Visibility=Collapsed"});
+    }
+
     // Custom app icons.
     // Positive offset moves the icon towards the dot (screen edge).
     std::wstring iconMargin =
@@ -9836,9 +9957,16 @@ void ApplyDockSettings() {
             }
         }
 
-        std::vector<std::wstring> iconStyles{
-            L"Source=" + FileUrl(folder, file), Fmt(L"Width=%d", iconSize),
-            Fmt(L"Height=%d", iconSize), iconMargin};
+        // Decoded at the magnified size, so they stay sharp when they grow.
+        std::wstring source =
+            MagnifyOn()
+                ? Fmt(L"Source:=<BitmapImage UriSource=\"%s\" DecodePixelWidth=\"%d\" "
+                      L"DecodePixelType=\"Logical\" />",
+                      FileUrl(folder, file).c_str(),
+                      (int)std::ceil(iconSize * MagnifyPercent() / 100.0))
+                : L"Source=" + FileUrl(folder, file);
+        std::vector<std::wstring> iconStyles{source, Fmt(L"Width=%d", iconSize),
+                                             Fmt(L"Height=%d", iconSize), iconMargin};
         // A separator line is vertical at the bottom and has to lie flat when
         // the dock runs from top to bottom.
         if (vertical) {
@@ -9858,6 +9986,1059 @@ void ApplyDockSettings() {
 }
 
 }  // namespace macdock
+
+// ===========================================================================
+// Dock effects: macOS magnification, the Recycle Bin and its divider
+// ===========================================================================
+// Adapted from the "MacOS Style Dock" mod by Zach Vaughn (GPL v3).
+//
+// - The glass of the dock is a Border ("MacDockGlass") added to the dock's
+//   RootGrid and styled like the RootGrid was before. It can grow past the
+//   RootGrid while icons are magnified, without changing the taskbar layout.
+// - The Recycle Bin ("MacDockTrash") and the divider before it sit in the
+//   room the RootGrid's padding keeps free after the last app.
+// - Magnification scales and shifts the buttons' composition visuals once per
+//   frame, so the taskbar's own layout (and where clicks land) never changes.
+// All of it runs on the taskbar's XAML thread.
+
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
+#include <winrt/Windows.Storage.h>
+#include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Windows.UI.Xaml.Input.h>
+
+#include <chrono>
+#include <functional>
+#include <list>
+#include <optional>
+
+// Raw access to a WriteableBitmap's pixels.
+MIDL_INTERFACE("905a0fef-bc53-11df-8c49-001e4fc686da")
+IMacDockBufferByteAccess : public IUnknown {
+public:
+    virtual HRESULT STDMETHODCALLTYPE Buffer(BYTE** value) = 0;
+};
+__CRT_UUID_DECL(IMacDockBufferByteAccess, 0x905a0fef, 0xbc53, 0x11df, 0x8c, 0x49, 0x00, 0x1e,
+                0x4f, 0xc6, 0x86, 0xda)
+
+namespace dockfx {
+
+namespace wadt = winrt::Windows::ApplicationModel::DataTransfer;
+namespace wxm = winrt::Windows::UI::Xaml::Media;
+namespace wxc = winrt::Windows::UI::Xaml::Controls;
+
+std::atomic<bool> g_stopping{false};
+
+bool UseGerman() {
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_GERMAN;
+}
+
+// ---- Settings (read on the taskbar thread when a dock is set up) ----
+
+struct Config {
+    bool magnify = false;
+    float maxScale = 1.0f;
+    float radius = 1;     // how far from the pointer icons still grow, px
+    int animMs = 100;
+    bool trash = false;
+    bool divider = false;
+    bool vertical = false;
+    bool rightEdge = false;
+    float iconSize = 38;
+    float trashSize = 38;
+    float trashSlot = 44;
+    float dividerSpace = 13;
+    float iconOffset = 0;
+} g_cfg;
+
+void LoadConfig() {
+    UINT edge = macdock::GetTaskbarEdge();
+    macdock::g_cachedEdge = edge;
+    g_cfg.vertical = macdock::IsVerticalEdge(edge);
+    g_cfg.rightEdge = edge == ABE_RIGHT;
+    g_cfg.magnify = macdock::MagnifyOn();
+    g_cfg.maxScale = macdock::MagnifyPercent() / 100.0f;
+    float pitch = (float)std::max(1, macdock::GetPx(L"buttonWidth"));
+    int range = std::clamp(macdock::GetInt(L"magnificationRange"), 1, 8);
+    g_cfg.radius = pitch * (range + 0.5f);
+    g_cfg.animMs = std::clamp(macdock::GetInt(L"magnificationSpeed"), 0, 1000);
+    g_cfg.trash = macdock::TrashOn();
+    g_cfg.divider = macdock::TrashDividerOn();
+    g_cfg.iconSize = (float)std::max(8, macdock::GetPx(L"iconSize"));
+    g_cfg.trashSize = g_cfg.iconSize;
+    g_cfg.trashSlot = (float)macdock::TrashSlot();
+    g_cfg.dividerSpace = (float)macdock::TrashDividerSpace();
+    g_cfg.iconOffset = (float)macdock::GetPx(L"iconOffsetY");
+}
+
+// The most the dock grows at each end while icons are magnified, in DIPs.
+float MaxSpread() {
+    if (!g_cfg.magnify || g_cfg.maxScale <= 1.0f) return 0;
+    return (g_cfg.maxScale - 1.0f) * (g_cfg.radius + g_cfg.trashSlot);
+}
+
+// ---- Small tree helpers ----
+
+FrameworkElement ChildByName(DependencyObject const& parent, PCWSTR name) {
+    int count = wxm::VisualTreeHelper::GetChildrenCount(parent);
+    for (int i = 0; i < count; i++) {
+        auto child = wxm::VisualTreeHelper::GetChild(parent, i).try_as<FrameworkElement>();
+        if (child && child.Name() == name) return child;
+    }
+    return nullptr;
+}
+
+FrameworkElement DescendantByName(DependencyObject const& parent, PCWSTR name, int depth) {
+    int count = wxm::VisualTreeHelper::GetChildrenCount(parent);
+    for (int i = 0; i < count; i++) {
+        auto child = wxm::VisualTreeHelper::GetChild(parent, i);
+        auto fe = child.try_as<FrameworkElement>();
+        if (fe && fe.Name() == name) return fe;
+        if (depth > 1) {
+            if (auto found = DescendantByName(child, name, depth - 1)) return found;
+        }
+    }
+    return nullptr;
+}
+
+// ---- Docks ----
+
+struct Dock {
+    winrt::weak_ref<FrameworkElement> frame;
+    winrt::weak_ref<wxc::Grid> root;
+    winrt::weak_ref<FrameworkElement> repeater;
+    wxc::Border glass{nullptr};
+    wxc::Grid trash{nullptr};
+    wxc::Image trashImage{nullptr};
+    wxc::Border divider{nullptr};
+    UIElement::Tapped_revoker trashTapped;
+    UIElement::RightTapped_revoker trashRightTapped;
+    UIElement::DragEnter_revoker trashDragEnter;
+    UIElement::DragOver_revoker trashDragOver;
+    UIElement::Drop_revoker trashDrop;
+    int trashState = -2;
+    float growStart = -1, growEnd = -1;  // last applied glass growth
+};
+
+[[clang::no_destroy]] std::optional<std::list<Dock>> g_docks{std::in_place};
+DWORD g_dockThread = 0;  // the taskbar's XAML thread, which owns all of this
+
+Dock* FindDockByFrame(FrameworkElement const& frame) {
+    for (auto& d : *g_docks) {
+        if (d.frame.get() == frame) return &d;
+    }
+    return nullptr;
+}
+
+Dock* FindDockByRoot(UIElement const& root) {
+    for (auto& d : *g_docks) {
+        if (auto r = d.root.get(); r && r == root) return &d;
+    }
+    return nullptr;
+}
+
+// Grows the glass past the RootGrid by `start` px before the first icon and
+// `end` px after the last one (along the dock).
+void ApplyGlass(Dock& d, float start, float end) {
+    if (!d.glass) return;
+    if (std::fabs(start - d.growStart) < 0.25f && std::fabs(end - d.growEnd) < 0.25f) return;
+    auto root = d.root.get();
+    if (!root) return;
+    d.growStart = start;
+    d.growEnd = end;
+    auto pad = root.Padding();
+    if (g_cfg.vertical) {
+        d.glass.Margin({-pad.Left, -pad.Top - start, -pad.Right, -pad.Bottom - end});
+    } else {
+        d.glass.Margin({-pad.Left - start, -pad.Top, -pad.Right - end, -pad.Bottom});
+    }
+}
+
+// ---- Recycle Bin ----
+
+// Windows' own Recycle Bin icon, `px` pixels square.
+wxm::ImageSource LoadStockTrashIcon(bool full, int px) {
+    SHSTOCKICONINFO info{sizeof(info)};
+    HICON icon = nullptr;
+    if (FAILED(SHGetStockIconInfo(full ? SIID_RECYCLERFULL : SIID_RECYCLER, SHGSI_ICONLOCATION,
+                                  &info)) ||
+        SHDefExtractIconW(info.szPath, info.iIcon, 0, &icon, nullptr, px) != S_OK || !icon) {
+        Wh_Log(L"[trash] couldn't load Windows' icon");
+        return nullptr;
+    }
+    ICONINFO ii{};
+    BITMAP bm{};
+    std::vector<BYTE> pixels;
+    if (GetIconInfo(icon, &ii)) {
+        if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bm), &bm)) {
+            BITMAPINFO bi{};
+            bi.bmiHeader = {sizeof(BITMAPINFOHEADER), bm.bmWidth, -bm.bmHeight, 1, 32, BI_RGB};
+            pixels.resize((size_t)bm.bmWidth * bm.bmHeight * 4);
+            HDC dc = GetDC(nullptr);
+            if (GetDIBits(dc, ii.hbmColor, 0, bm.bmHeight, pixels.data(), &bi, DIB_RGB_COLORS) !=
+                bm.bmHeight) {
+                pixels.clear();
+            }
+            ReleaseDC(nullptr, dc);
+        }
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    }
+    DestroyIcon(icon);
+    if (pixels.empty()) return nullptr;
+    // XAML wants the colors premultiplied by their transparency.
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        BYTE a = pixels[i + 3];
+        for (int c = 0; c < 3; c++) pixels[i + c] = (BYTE)(pixels[i + c] * a / 255);
+    }
+    wxm::Imaging::WriteableBitmap bitmap(bm.bmWidth, bm.bmHeight);
+    BYTE* data = nullptr;
+    winrt::check_hresult(bitmap.PixelBuffer().as<IMacDockBufferByteAccess>()->Buffer(&data));
+    memcpy(data, pixels.data(), pixels.size());
+    bitmap.Invalidate();
+    return bitmap;
+}
+
+std::wstring ExpandedIconFolder() {
+    std::wstring folder = macdock::GetStr(L"iconFolder");
+    WCHAR expanded[MAX_PATH * 2];
+    DWORD len = ExpandEnvironmentStringsW(folder.c_str(), expanded, ARRAYSIZE(expanded));
+    if (len > 0 && len <= ARRAYSIZE(expanded)) folder = expanded;
+    while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+    return folder;
+}
+
+// The Recycle Bin PNG of the active icon set, or "" for Windows' icon.
+std::wstring FindTrashFile(bool full) {
+    if (macdock::ActiveIconSet() == L"windows") return L"";
+    std::wstring folder = ExpandedIconFolder();
+    if (folder.empty()) return L"";
+    static const PCWSTR kFull[] = {L"trash (full).png", L"trash full.png", L"trash-full.png",
+                                   L"trashfull.png",    L"papierkorb (voll).png"};
+    static const PCWSTR kEmpty[] = {L"trash (empty).png", L"trash empty.png",
+                                    L"trash-empty.png",   L"trash.png",
+                                    L"papierkorb.png",    L"papierkorb (leer).png"};
+    auto exists = [&](PCWSTR name) {
+        DWORD a = GetFileAttributesW((folder + L"\\" + name).c_str());
+        return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    };
+    if (full) {
+        for (auto n : kFull) {
+            if (exists(n)) return n;
+        }
+    }
+    for (auto n : kEmpty) {
+        if (exists(n)) return n;
+    }
+    return L"";
+}
+
+[[clang::no_destroy]] wxm::ImageSource g_trashIcons[2] = {nullptr, nullptr};
+
+wxm::ImageSource TrashIcon(bool full, UIElement const& el) {
+    auto& icon = g_trashIcons[full];
+    if (icon) return icon;
+    double dpiScale = 1;
+    try {
+        if (auto root = el.XamlRoot()) dpiScale = root.RasterizationScale();
+    } catch (...) {
+    }
+    float shown = g_cfg.trashSize * std::max(1.0f, g_cfg.maxScale);
+    std::wstring file = FindTrashFile(full);
+    if (!file.empty()) {
+        wxm::Imaging::BitmapImage bitmap;
+        bitmap.DecodePixelType(wxm::Imaging::DecodePixelType::Logical);
+        bitmap.DecodePixelWidth((int)std::ceil(shown));
+        bitmap.UriSource(winrt::Windows::Foundation::Uri(macdock::FileUrl(ExpandedIconFolder(), file)));
+        return icon = bitmap;
+    }
+    return icon = LoadStockTrashIcon(full, (int)std::ceil(shown * 1.1f * dpiScale));
+}
+
+// Whether the Recycle Bin has anything in it: -1 = not known, 0 = empty, 1 = full.
+std::atomic<int> g_trashFull{-1};
+std::atomic<bool> g_trashChecking{false};
+PTP_WORK g_trashWork = nullptr;
+ULONG g_trashNotify = 0;
+std::atomic<HWND> g_fxWindow{nullptr};
+constexpr UINT kTrashChangedMessage = WM_APP + 0x40;
+constexpr UINT kTrashCheckedMessage = WM_APP + 0x41;
+constexpr WCHAR kFxWindowClass[] = L"WhMacDockFx_" WH_MOD_ID;
+
+void CALLBACK CheckRecycleBin(PTP_CALLBACK_INSTANCE, PVOID, PTP_WORK) {
+    HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    SHQUERYRBINFO info{sizeof(info)};
+    if (SUCCEEDED(SHQueryRecycleBinW(nullptr, &info))) g_trashFull = info.i64NumItems > 0;
+    if (SUCCEEDED(co)) CoUninitialize();
+    g_trashChecking = false;
+    if (HWND w = g_fxWindow) PostMessageW(w, kTrashCheckedMessage, 0, 0);
+}
+
+void CheckRecycleBinSoon() {
+    if (g_trashWork && !g_trashChecking.exchange(true)) SubmitThreadpoolWork(g_trashWork);
+}
+
+void UpdateTrashIcons() {
+    int full = g_trashFull;
+    for (auto& d : *g_docks) {
+        if (!d.trashImage || d.trashState == full) continue;
+        d.trashState = full;
+        try {
+            d.trashImage.Source(TrashIcon(full == 1, d.trashImage));
+        } catch (...) {
+            Wh_Log(L"[trash] icon failed: 0x%08X", winrt::to_hresult());
+        }
+    }
+}
+
+LRESULT CALLBACK FxWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case kTrashChangedMessage:
+            CheckRecycleBinSoon();
+            return 0;
+        case kTrashCheckedMessage:
+            if (!g_stopping) {
+                try {
+                    UpdateTrashIcons();
+                } catch (...) {
+                }
+            }
+            return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+HINSTANCE FxModule() {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)&FxModule, &module);
+    return module;
+}
+
+// Watches the Recycle Bin from a message window on the taskbar's thread.
+void StartTrashWatch() {
+    if (!g_trashWork) g_trashWork = CreateThreadpoolWork(CheckRecycleBin, nullptr, nullptr);
+    if (!g_fxWindow) {
+        static bool registered = [] {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = FxWindowProc;
+            wc.hInstance = FxModule();
+            wc.lpszClassName = kFxWindowClass;
+            return RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+        }();
+        if (registered) {
+            g_fxWindow = CreateWindowExW(0, kFxWindowClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                                         nullptr, FxModule(), nullptr);
+        }
+    }
+    CheckRecycleBinSoon();
+    if (g_trashNotify || !g_fxWindow) return;
+    PIDLIST_ABSOLUTE bin;
+    if (FAILED(SHGetFolderLocation(nullptr, CSIDL_BITBUCKET, nullptr, 0, &bin))) return;
+    SHChangeNotifyEntry entry{bin, TRUE};
+    g_trashNotify = SHChangeNotifyRegister(g_fxWindow, SHCNRF_ShellLevel, SHCNE_ALLEVENTS,
+                                           kTrashChangedMessage, 1, &entry);
+    CoTaskMemFree(bin);
+}
+
+void StopTrashWatch() {
+    if (g_trashNotify) {
+        SHChangeNotifyDeregister(g_trashNotify);
+        g_trashNotify = 0;
+    }
+    if (HWND w = g_fxWindow.exchange(nullptr)) DestroyWindow(w);
+    g_trashIcons[0] = g_trashIcons[1] = nullptr;
+    g_trashFull = -1;
+}
+
+// Recycling and emptying run on a thread pool thread, one at a time: they can
+// show Windows' own progress and confirmation windows.
+std::mutex g_shellJobsLock;
+std::vector<std::function<void()>> g_shellJobs;
+PTP_WORK g_shellJobWork = nullptr;
+
+void CALLBACK RunShellJob(PTP_CALLBACK_INSTANCE, PVOID, PTP_WORK) {
+    std::function<void()> job;
+    {
+        std::lock_guard lock(g_shellJobsLock);
+        if (g_shellJobs.empty()) return;
+        job = std::move(g_shellJobs.front());
+        g_shellJobs.erase(g_shellJobs.begin());
+    }
+    HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    try {
+        job();
+    } catch (...) {
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+}
+
+void QueueShellJob(std::function<void()> job) {
+    if (g_stopping) return;
+    if (!g_shellJobWork) g_shellJobWork = CreateThreadpoolWork(RunShellJob, nullptr, nullptr);
+    if (!g_shellJobWork) return;
+    {
+        std::lock_guard lock(g_shellJobsLock);
+        g_shellJobs.push_back(std::move(job));
+    }
+    SubmitThreadpoolWork(g_shellJobWork);
+}
+
+void OpenRecycleBin() {
+    ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void RecycleFiles(std::wstring const& paths) {
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE;
+    op.pFrom = paths.c_str();  // list of null-terminated paths, ended by its own null
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING;
+    if (int error = SHFileOperationW(&op)) Wh_Log(L"[trash] recycling failed: %d", error);
+    CheckRecycleBinSoon();
+}
+
+void EmptyRecycleBin() {
+    SHEmptyRecycleBinW(nullptr, nullptr, 0);  // asks first, like everywhere in Windows
+    CheckRecycleBinSoon();
+}
+
+void ShowTrashMenu(FrameworkElement const& target) {
+    bool de = UseGerman();
+    wxc::MenuFlyoutItem open;
+    open.Text(de ? L"Öffnen" : L"Open");
+    open.Click([](auto&&, auto&&) { OpenRecycleBin(); });
+    wxc::MenuFlyoutItem empty;
+    empty.Text(de ? L"Papierkorb leeren …" : L"Empty Recycle Bin …");
+    empty.IsEnabled(g_trashFull != 0);
+    empty.Click([](auto&&, auto&&) { QueueShellJob(EmptyRecycleBin); });
+    wxc::MenuFlyout menu;
+    menu.Items().Append(open);
+    menu.Items().Append(empty);
+    menu.ShowAt(target);
+}
+
+void AcceptTrashDrag(DragEventArgs const& e) {
+    if (!e.DataView().Contains(wadt::StandardDataFormats::StorageItems())) return;
+    e.AcceptedOperation(wadt::DataPackageOperation::Move);
+    if (auto ui = e.DragUIOverride()) {
+        ui.Caption(UseGerman() ? L"In den Papierkorb verschieben" : L"Move to Recycle Bin");
+    }
+    e.Handled(true);
+}
+
+// The drop finishes right away (the source window waits for it, and the paths
+// are read from that same window), and reports that nothing happened to the
+// files, so the source doesn't delete them itself.
+void OnTrashDrop(DragEventArgs const& e) {
+    e.Handled(true);
+    e.AcceptedOperation(wadt::DataPackageOperation::None);
+    if (!e.DataView().Contains(wadt::StandardDataFormats::StorageItems())) return;
+    QueueShellJob([items = winrt::make_agile(e.DataView().GetStorageItemsAsync())] {
+        std::wstring paths;
+        try {
+            for (auto const& item : items.get().get()) {
+                auto path = item.Path();
+                if (path.empty()) continue;
+                paths.append(path.c_str(), path.size());
+                paths.push_back(L'\0');
+            }
+        } catch (...) {
+            Wh_Log(L"[trash] reading the dropped files failed: 0x%08X", winrt::to_hresult());
+            return;
+        }
+        if (!paths.empty()) RecycleFiles(paths);
+    });
+}
+
+void HookUpTrash(Dock& d) {
+    d.trash.AllowDrop(true);
+    d.trashTapped = d.trash.Tapped(winrt::auto_revoke, [](auto&&, Input::TappedRoutedEventArgs const& e) {
+        e.Handled(true);
+        OpenRecycleBin();
+    });
+    d.trashRightTapped = d.trash.RightTapped(
+        winrt::auto_revoke,
+        [](winrt::Windows::Foundation::IInspectable const& sender,
+           Input::RightTappedRoutedEventArgs const& e) {
+            e.Handled(true);
+            try {
+                ShowTrashMenu(sender.as<FrameworkElement>());
+            } catch (...) {
+                Wh_Log(L"[trash] menu failed: 0x%08X", winrt::to_hresult());
+            }
+        });
+    auto accept = [](auto&&, DragEventArgs const& e) {
+        try {
+            AcceptTrashDrag(e);
+        } catch (...) {
+        }
+    };
+    d.trashDragEnter = d.trash.DragEnter(winrt::auto_revoke, accept);
+    d.trashDragOver = d.trash.DragOver(winrt::auto_revoke, accept);
+    d.trashDrop = d.trash.Drop(winrt::auto_revoke, [](auto&&, DragEventArgs const& e) {
+        try {
+            OnTrashDrop(e);
+        } catch (...) {
+            Wh_Log(L"[trash] drop failed: 0x%08X", winrt::to_hresult());
+        }
+    });
+}
+
+// Puts the Recycle Bin and the divider into the room the RootGrid's padding
+// keeps free after the last app (see macdock::TrashSpace).
+void AddTrash(Dock& d, wxc::Grid const& root, uint32_t index) {
+    float size = g_cfg.trashSize;
+    float off = g_cfg.iconOffset;
+    float trashFromEnd = -(g_cfg.dividerSpace + (g_cfg.trashSlot + size) / 2);
+    float dividerFromEnd = -(g_cfg.dividerSpace / 2 + 0.5f);
+    // Same cross-axis shift as the icons (see "Custom app icons").
+    float crossA = off, crossB = -off;
+    if (g_cfg.vertical && g_cfg.rightEdge) std::swap(crossA, crossB);
+
+    wxc::Grid trash;
+    trash.Name(L"MacDockTrash");
+    trash.Width(size);
+    trash.Height(size);
+    trash.Background(wxm::SolidColorBrush(winrt::Windows::UI::Color{0, 0, 0, 0}));
+    wxc::ToolTipService::SetToolTip(
+        trash, winrt::box_value(UseGerman() ? L"Papierkorb" : L"Recycle Bin"));
+    wxc::Image image;
+    image.Stretch(wxm::Stretch::Uniform);
+    trash.Children().Append(image);
+    wxc::Grid::SetRowSpan(trash, 100);
+    wxc::Grid::SetColumnSpan(trash, 100);
+    if (g_cfg.vertical) {
+        trash.HorizontalAlignment(HorizontalAlignment::Center);
+        trash.VerticalAlignment(VerticalAlignment::Bottom);
+        trash.Margin({crossA, 0, crossB, trashFromEnd});
+    } else {
+        trash.HorizontalAlignment(HorizontalAlignment::Right);
+        trash.VerticalAlignment(VerticalAlignment::Center);
+        trash.Margin({0, crossA, trashFromEnd, crossB});
+    }
+    root.Children().InsertAt(index, trash);
+    d.trash = trash;
+    d.trashImage = image;
+
+    if (g_cfg.divider) {
+        bool dark = macdock::IsDarkAppearance();
+        wxc::Border divider;
+        divider.Name(L"MacDockDivider");
+        divider.IsHitTestVisible(false);
+        divider.Background(wxm::SolidColorBrush(
+            dark ? winrt::Windows::UI::Color{90, 255, 255, 255}
+                 : winrt::Windows::UI::Color{70, 0, 0, 0}));
+        wxc::Grid::SetRowSpan(divider, 100);
+        wxc::Grid::SetColumnSpan(divider, 100);
+        float length = std::round(g_cfg.iconSize * 0.8f);
+        if (g_cfg.vertical) {
+            divider.Width(length);
+            divider.Height(1);
+            divider.HorizontalAlignment(HorizontalAlignment::Center);
+            divider.VerticalAlignment(VerticalAlignment::Bottom);
+            divider.Margin({crossA, 0, crossB, dividerFromEnd});
+        } else {
+            divider.Width(1);
+            divider.Height(length);
+            divider.HorizontalAlignment(HorizontalAlignment::Right);
+            divider.VerticalAlignment(VerticalAlignment::Center);
+            divider.Margin({0, crossA, dividerFromEnd, crossB});
+        }
+        root.Children().InsertAt(index, divider);
+        d.divider = divider;
+    }
+
+    HookUpTrash(d);
+    StartTrashWatch();
+    UpdateTrashIcons();
+}
+
+// Sets up one taskbar's dock. False if its RootGrid isn't there yet.
+bool SetupDock(FrameworkElement const& frame) {
+    auto rootFe = ChildByName(frame, L"RootGrid");
+    auto root = rootFe ? rootFe.try_as<wxc::Grid>() : nullptr;
+    if (!root) return false;
+    if (FindDockByRoot(root)) return true;
+    auto repeater = ChildByName(root, L"TaskbarFrameRepeater");
+    if (!repeater) return false;
+
+    LoadConfig();
+    g_dockThread = GetCurrentThreadId();
+    auto& d = g_docks->emplace_back();
+    d.frame = winrt::make_weak(frame);
+    d.root = winrt::make_weak(root);
+    d.repeater = winrt::make_weak(repeater);
+
+    // The glass goes right behind the icons; the styles give it its look.
+    uint32_t index = 0;
+    if (!root.Children().IndexOf(repeater, index)) index = 0;
+    wxc::Border glass;
+    glass.Name(L"MacDockGlass");
+    glass.IsHitTestVisible(false);
+    glass.HorizontalAlignment(HorizontalAlignment::Stretch);
+    glass.VerticalAlignment(VerticalAlignment::Stretch);
+    wxc::Grid::SetRowSpan(glass, 100);
+    wxc::Grid::SetColumnSpan(glass, 100);
+    d.glass = glass;
+    ApplyGlass(d, 0, 0);
+    root.Children().InsertAt(index, glass);
+
+    // The Recycle Bin and the divider go above the icons.
+    if (g_cfg.trash) {
+        uint32_t after = 0;
+        if (root.Children().IndexOf(repeater, after)) AddTrash(d, root, after + 1);
+    }
+    Wh_Log(L"Dock effects set up (magnify=%d, trash=%d)", g_cfg.magnify, g_cfg.trash);
+    return true;
+}
+
+// Taskbars reported by the style engine, set up shortly after (once their
+// template is in place), outside the engine's own tree callbacks.
+std::vector<winrt::weak_ref<FrameworkElement>> g_pendingFrames;
+winrt::Windows::System::DispatcherQueueTimer g_setupTimer{nullptr};
+int g_setupTicks = 0;
+DWORD g_timerThread = 0;
+
+void SetupPending() {
+    std::vector<winrt::weak_ref<FrameworkElement>> left;
+    for (auto& weak : g_pendingFrames) {
+        auto frame = weak.get();
+        if (!frame) continue;
+        bool done = false;
+        try {
+            done = SetupDock(frame);
+        } catch (...) {
+            Wh_Log(L"Dock effects setup failed: 0x%08X", winrt::to_hresult());
+            done = true;
+        }
+        if (!done) left.push_back(weak);
+    }
+    g_pendingFrames = std::move(left);
+    if ((g_pendingFrames.empty() || ++g_setupTicks > 40) && g_setupTimer) {
+        g_setupTimer.Stop();
+        g_pendingFrames.clear();
+    }
+}
+
+void NoteElement(FrameworkElement const& element) {
+    if (g_stopping || winrt::get_class_name(element) != L"Taskbar.TaskbarFrame") return;
+    for (auto& f : g_pendingFrames) {
+        if (f.get() == element) return;
+    }
+    g_pendingFrames.push_back(winrt::make_weak(element));
+    g_setupTicks = 0;
+    if (!g_setupTimer) {
+        auto queue = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+        if (!queue) return;
+        g_setupTimer = queue.CreateTimer();
+        g_timerThread = GetCurrentThreadId();
+        g_setupTimer.Interval(std::chrono::milliseconds(250));
+        g_setupTimer.Tick([](auto&&, auto&&) {
+            try {
+                SetupPending();
+            } catch (...) {
+            }
+        });
+    }
+    g_setupTimer.Start();
+}
+
+// ---- Magnification ----
+
+struct Item {
+    winrt::weak_ref<FrameworkElement> element;  // null for the Recycle Bin
+    bool trash = false;
+    float center = 0, pitch = 0;  // along the dock, in the repeater's coordinates
+    winrt::Windows::Foundation::Numerics::float2 pivot{};  // in the element
+    winrt::weak_ref<FrameworkElement> dot;
+    float dotCenter = 0;  // across the dock, in the button
+    float scale = 1, shift = 0;
+};
+
+std::vector<Item> g_row;
+Dock* g_rowDock = nullptr;
+bool g_pointerOver = false;
+bool g_expanded = false;
+float g_pointer = 0;
+bool g_anchorStart = true;
+float g_maxGrowth = 0, g_lastGrowth = 0;
+
+winrt::event_token g_frameToken{};
+bool g_frameRunning = false;
+std::chrono::steady_clock::time_point g_lastFrame;
+
+void RefreshRegions();
+
+// The point an icon grows from: the middle of its edge on the screen-edge side.
+winrt::Windows::Foundation::Numerics::float2 PivotOf(winrt::Windows::Foundation::Rect const& icon) {
+    if (!g_cfg.vertical) return {icon.X + icon.Width / 2, icon.Y + icon.Height};
+    if (g_cfg.rightEdge) return {icon.X + icon.Width, icon.Y + icon.Height / 2};
+    return {icon.X, icon.Y + icon.Height / 2};
+}
+
+void SetItemScale(Item& item, float s, float shift) {
+    item.scale = s;
+    item.shift = shift;
+    FrameworkElement el{nullptr};
+    if (item.trash) {
+        if (g_rowDock) el = g_rowDock->trash;
+    } else {
+        el = item.element.get();
+    }
+    if (!el) return;
+    auto visual = wuxh::ElementCompositionPreview::GetElementVisual(el);
+    visual.CenterPoint({item.pivot.x, item.pivot.y, 0});
+    visual.Scale({s, s, 1});
+    wuxh::ElementCompositionPreview::SetIsTranslationEnabled(el, true);
+    visual.Properties().InsertVector3(
+        L"Translation", g_cfg.vertical ? winrt::Windows::Foundation::Numerics::float3{0, shift, 0}
+                                       : winrt::Windows::Foundation::Numerics::float3{shift, 0, 0});
+
+    // The dot stays where it is across the dock and keeps its size.
+    if (auto dot = item.dot.get()) {
+        auto dv = wuxh::ElementCompositionPreview::GetElementVisual(dot);
+        wuxh::ElementCompositionPreview::SetIsTranslationEnabled(dot, true);
+        float w = (float)dot.ActualWidth(), h = (float)dot.ActualHeight();
+        dv.CenterPoint({w / 2, h / 2, 0});
+        dv.Scale({1 / s, 1 / s, 1});
+        float p = g_cfg.vertical ? item.pivot.x : item.pivot.y;
+        float t = (item.dotCenter - p) / s + p - item.dotCenter;
+        dv.Properties().InsertVector3(
+            L"Translation", g_cfg.vertical ? winrt::Windows::Foundation::Numerics::float3{t, 0, 0}
+                                           : winrt::Windows::Foundation::Numerics::float3{0, t, 0});
+    }
+}
+
+void ResetItem(Item& item) {
+    try {
+        SetItemScale(item, 1.0f, 0);
+    } catch (...) {
+    }
+}
+
+// Re-reads the icons of `dock`, in their current order. Items that were
+// already there keep their current size.
+void BuildRow(Dock* dock) {
+    std::vector<Item> old = std::move(g_row);
+    Dock* oldDock = g_rowDock;
+    g_row.clear();
+    g_rowDock = dock;
+    if (oldDock != dock) g_maxGrowth = g_lastGrowth = 0;
+
+    auto repeater = dock ? dock->repeater.get() : nullptr;
+    if (repeater) {
+        float crossSize = (float)(g_cfg.vertical ? repeater.ActualWidth() : repeater.ActualHeight());
+        int count = wxm::VisualTreeHelper::GetChildrenCount(repeater);
+        for (int i = 0; i < count; i++) {
+            auto el = wxm::VisualTreeHelper::GetChild(repeater, i).try_as<FrameworkElement>();
+            if (!el || el.Visibility() != Visibility::Visible || el.ActualWidth() <= 0 ||
+                el.ActualHeight() <= 0) {
+                continue;
+            }
+            auto cls = winrt::get_class_name(el);
+            if (cls != L"Taskbar.TaskListButton" && cls != L"Taskbar.ExperienceToggleButton") {
+                continue;
+            }
+            // Where the taskbar laid it out; ignores the scaling applied here.
+            auto slot = wxc::Primitives::LayoutInformation::GetLayoutSlot(el);
+            float cross = g_cfg.vertical ? slot.X : slot.Y;
+            if (cross < -crossSize || cross > crossSize) continue;  // recycled, parked
+            Item item;
+            item.element = winrt::make_weak(el);
+            item.center = g_cfg.vertical ? slot.Y + slot.Height / 2 : slot.X + slot.Width / 2;
+            item.pitch = std::max(1.0f, g_cfg.vertical ? slot.Height : slot.Width);
+            winrt::Windows::Foundation::Rect iconRect{0, 0, (float)el.ActualWidth(), (float)el.ActualHeight()};
+            if (auto icon = DescendantByName(el, L"Icon", 4)) {
+                iconRect = icon.TransformToVisual(el).TransformBounds(
+                    {0, 0, (float)icon.ActualWidth(), (float)icon.ActualHeight()});
+            }
+            item.pivot = PivotOf(iconRect);
+            if (auto dot = DescendantByName(el, L"RunningIndicator", 4)) {
+                auto r = dot.TransformToVisual(el).TransformBounds(
+                    {0, 0, (float)dot.ActualWidth(), (float)dot.ActualHeight()});
+                item.dot = winrt::make_weak(dot);
+                item.dotCenter = g_cfg.vertical ? r.X + r.Width / 2 : r.Y + r.Height / 2;
+            }
+            for (auto& o : old) {
+                if (!o.trash && o.element.get() == el) {
+                    item.scale = o.scale;
+                    item.shift = o.shift;
+                    o.element = nullptr;  // still here; don't reset it below
+                    break;
+                }
+            }
+            g_row.push_back(item);
+        }
+        std::sort(g_row.begin(), g_row.end(),
+                  [](Item const& a, Item const& b) { return a.center < b.center; });
+
+        // The Recycle Bin comes last.
+        if (dock->trash && dock->trash.Visibility() == Visibility::Visible && !g_row.empty()) {
+            Item item;
+            item.trash = true;
+            float size = g_cfg.trashSize;
+            auto pos = dock->trash.TransformToVisual(repeater).TransformPoint({0, 0});
+            item.center = (g_cfg.vertical ? pos.Y : pos.X) + size / 2;
+            item.pitch = g_cfg.trashSlot;
+            item.pivot = PivotOf({0, 0, size, size});
+            for (auto& o : old) {
+                if (o.trash && oldDock == dock) {
+                    item.scale = o.scale;
+                    item.shift = o.shift;
+                    o.trash = false;
+                    o.element = nullptr;
+                }
+            }
+            g_row.push_back(item);
+        }
+    }
+
+    // Icons that dropped out go back to normal size right away.
+    Dock* current = g_rowDock;
+    for (auto& o : old) {
+        if (o.trash) {
+            g_rowDock = oldDock;
+            ResetItem(o);
+            g_rowDock = current;
+            if (oldDock && oldDock->divider) {
+                try {
+                    wuxh::ElementCompositionPreview::GetElementVisual(oldDock->divider)
+                        .Properties()
+                        .InsertVector3(L"Translation", {0, 0, 0});
+                } catch (...) {
+                }
+            }
+        } else if (o.element.get()) {
+            ResetItem(o);
+        }
+    }
+    if (oldDock && oldDock != dock) ApplyGlass(*oldDock, 0, 0);
+}
+
+void StopFrames() {
+    if (!g_frameRunning) return;
+    wxm::CompositionTarget::Rendering(g_frameToken);
+    g_frameRunning = false;
+}
+
+void SetExpanded(bool expanded) {
+    if (expanded == g_expanded) return;
+    g_expanded = expanded;
+    try {
+        RefreshRegions();
+    } catch (...) {
+    }
+}
+
+void OnFrame() {
+    auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - g_lastFrame).count();
+    g_lastFrame = now;
+    if (dt > 0.1f) dt = 0.1f;
+    float alpha = 1.0f;
+    if (g_cfg.animMs > 0) {
+        float tau = g_cfg.animMs / 1000.0f / 3.0f;
+        alpha = 1.0f - std::exp(-dt / tau);
+    }
+
+    if (g_rowDock) BuildRow(g_rowDock);
+
+    // 1. Move each icon's size toward its target (cosine falloff).
+    bool settled = true;
+    std::vector<float> scales(g_row.size(), 1.0f);
+    for (size_t i = 0; i < g_row.size(); i++) {
+        auto& item = g_row[i];
+        float target = 1.0f;
+        if (g_pointerOver) {
+            float d = std::fabs(g_pointer - item.center);
+            if (d < g_cfg.radius) {
+                float k = (std::cos(d / g_cfg.radius * 3.14159265f) + 1.0f) / 2.0f;
+                target = 1.0f + (g_cfg.maxScale - 1.0f) * k;
+            }
+        }
+        float s = item.scale + (target - item.scale) * alpha;
+        if (std::fabs(target - s) < 0.001f) {
+            s = target;
+        } else {
+            settled = false;
+        }
+        scales[i] = s;
+    }
+
+    bool expanded = g_pointerOver;
+    for (float s : scales) expanded |= s > 1.0f;
+    SetExpanded(expanded);
+
+    // 2. Spread: every icon is pushed along by the growth of the ones before
+    //    it, and the row is pulled back by part of the total. As on a Mac, the
+    //    end of the dock away from the pointer's half stays put.
+    float total = 0;
+    for (size_t i = 0; i < g_row.size(); i++) total += (scales[i] - 1.0f) * g_row[i].pitch;
+    if (g_pointerOver) {
+        if (!g_row.empty()) {
+            float middle = (g_row.front().center - g_row.front().pitch / 2 +
+                            g_row.back().center + g_row.back().pitch / 2) / 2;
+            g_anchorStart = g_pointer > middle;
+        }
+        g_maxGrowth = std::max(g_maxGrowth, total);
+    } else if (g_lastGrowth > 0) {
+        g_maxGrowth *= total / g_lastGrowth;
+    } else {
+        g_maxGrowth = total;
+    }
+    g_lastGrowth = total;
+    float growStart = g_anchorStart ? g_maxGrowth / 2 : total - g_maxGrowth / 2;
+
+    float before = 0, trashGapShift = 0;
+    for (size_t i = 0; i < g_row.size(); i++) {
+        auto& item = g_row[i];
+        float extra = (scales[i] - 1.0f) * item.pitch;
+        float shift = before + extra / 2 - growStart;
+        if (item.trash) trashGapShift = before - growStart;
+        before += extra;
+        if (scales[i] != item.scale || std::fabs(shift - item.shift) > 0.01f) {
+            SetItemScale(item, scales[i], shift);
+        }
+    }
+    if (g_rowDock && g_rowDock->divider) {
+        auto v = wuxh::ElementCompositionPreview::GetElementVisual(g_rowDock->divider);
+        wuxh::ElementCompositionPreview::SetIsTranslationEnabled(g_rowDock->divider, true);
+        v.Properties().InsertVector3(
+            L"Translation",
+            g_cfg.vertical ? winrt::Windows::Foundation::Numerics::float3{0, trashGapShift, 0}
+                           : winrt::Windows::Foundation::Numerics::float3{trashGapShift, 0, 0});
+    }
+
+    // 3. The glass grows the same way.
+    if (g_rowDock) ApplyGlass(*g_rowDock, std::max(0.0f, growStart), std::max(0.0f, total - growStart));
+
+    if (settled) StopFrames();
+}
+
+void StartFrames() {
+    if (g_frameRunning || g_stopping) return;
+    g_lastFrame = std::chrono::steady_clock::now();
+    g_frameToken = wxm::CompositionTarget::Rendering([](auto&&, auto&&) {
+        try {
+            OnFrame();
+        } catch (...) {
+            Wh_Log(L"Magnification error: 0x%08X", winrt::to_hresult());
+            StopFrames();
+        }
+    });
+    g_frameRunning = true;
+}
+
+// The pointer moved over a taskbar (TaskbarFrame hook).
+void OnPointerMoved(FrameworkElement const& frame, Input::PointerRoutedEventArgs const& e) {
+    if (g_stopping || !g_cfg.magnify) return;
+    Dock* d = FindDockByFrame(frame);
+    auto root = d ? d->root.get() : nullptr;
+    auto repeater = d ? d->repeater.get() : nullptr;
+    bool over = false;
+    if (root && repeater) {
+        auto p = e.GetCurrentPoint(root).Position();
+        float len = (float)(g_cfg.vertical ? root.ActualHeight() : root.ActualWidth());
+        float main = g_cfg.vertical ? p.Y : p.X;
+        float startGrow = std::max(0.0f, d->growStart), endGrow = std::max(0.0f, d->growEnd);
+        bool inMain = main >= -startGrow && main <= len + endGrow;
+        bool sameRow = g_pointerOver && g_rowDock == d;
+        bool inCross;
+        if (!g_cfg.vertical) {
+            inCross = p.Y >= 0 || sameRow;  // above the dock only once it magnifies
+        } else if (g_cfg.rightEdge) {
+            inCross = p.X >= 0 || sameRow;
+        } else {
+            inCross = p.X <= root.ActualWidth() || sameRow;
+        }
+        over = inMain && inCross;
+        if (over) {
+            if (g_rowDock != d) BuildRow(d);
+            auto q = e.GetCurrentPoint(repeater).Position();
+            g_pointer = g_cfg.vertical ? q.Y : q.X;
+        }
+    }
+    if (over != g_pointerOver || over) {
+        g_pointerOver = over;
+        StartFrames();
+    }
+}
+
+void OnPointerExited() {
+    if (g_stopping || !g_pointerOver) return;
+    g_pointerOver = false;
+    StartFrames();
+}
+
+// For the click-through region: whether magnified icons may reach past the
+// dock, and how much room the taskbar keeps above the dock for them.
+bool RegionExpanded() {
+    return g_expanded;
+}
+
+// Removes everything from the taskbar (style reload, mod unload).
+void Reset() {
+    // Other XAML threads (Start, search...) are reset too; only the taskbar's
+    // own thread may touch its elements.
+    DWORD thread = GetCurrentThreadId();
+    if ((g_dockThread && g_dockThread != thread) ||
+        (!g_dockThread && g_timerThread && g_timerThread != thread)) {
+        return;
+    }
+    StopFrames();
+    if (g_setupTimer) {
+        try {
+            g_setupTimer.Stop();
+        } catch (...) {
+        }
+        g_setupTimer = nullptr;
+        g_timerThread = 0;
+    }
+    g_pendingFrames.clear();
+    for (auto& item : g_row) ResetItem(item);
+    g_row.clear();
+    g_rowDock = nullptr;
+    g_pointerOver = false;
+    g_expanded = false;
+    g_maxGrowth = g_lastGrowth = 0;
+    for (auto& d : *g_docks) {
+        d.trashTapped.revoke();
+        d.trashRightTapped.revoke();
+        d.trashDragEnter.revoke();
+        d.trashDragOver.revoke();
+        d.trashDrop.revoke();
+        auto root = d.root.get();
+        if (!root) continue;
+        for (UIElement el : {UIElement(d.glass), UIElement(d.trash), UIElement(d.divider)}) {
+            uint32_t index;
+            try {
+                if (el && root.Children().IndexOf(el, index)) root.Children().RemoveAt(index);
+            } catch (...) {
+            }
+        }
+    }
+    g_docks->clear();
+    StopTrashWatch();
+    g_dockThread = 0;
+}
+
+// Off the taskbar's thread, after Reset: waits for shell jobs still running.
+void Shutdown() {
+    g_stopping = true;
+    for (PTP_WORK* work : {&g_shellJobWork, &g_trashWork}) {
+        if (!*work) continue;
+        WaitForThreadpoolWorkCallbacks(*work, FALSE);
+        CloseThreadpoolWork(*work);
+        *work = nullptr;
+    }
+    UnregisterClassW(kFxWindowClass, FxModule());
+}
+
+void RefreshRegions() {
+    for (auto& entry : g_clickThroughTaskbarState) UpdateClickThroughRegion(entry);
+}
+
+}  // namespace dockfx
 
 void ProcessAllStylesFromSettings() {
     StyleConstants styleConstants = LoadStyleConstants({});
@@ -9914,6 +11095,14 @@ void UninitializeResourceVariables() {
 }
 
 void UninitializeForCurrentThread() {
+    // The dock's own elements and magnification go first, while the styles
+    // they rely on are still in place.
+    try {
+        dockfx::Reset();
+    } catch (...) {
+        Wh_Log(L"Dock effects reset failed: 0x%08X", winrt::to_hresult());
+    }
+
     // Drop the click-through subclasses before restoring the windows below.
     // ClearClickThroughRegions calls SetWindowRgn, which sends
     // WM_WINDOWPOSCHANGED synchronously, and a still-attached subclass would
@@ -11736,6 +12925,48 @@ using TaskbarFrame_MeasureOverride_t =
     int(WINAPI*)(void* pThis,
                  winrt::Windows::Foundation::Size size,
                  winrt::Windows::Foundation::Size* resultSize);
+// The pointer over the taskbar, for the magnification (see dockfx).
+using TaskbarFrame_OnPointer_t = int(WINAPI*)(void* pThis, void* pArgs);
+
+FrameworkElement TaskbarFrameFromOverrides(void* pThis) {
+    FrameworkElement element{nullptr};
+    ((IUnknown*)pThis)
+        ->QueryInterface(winrt::guid_of<FrameworkElement>(),
+                         winrt::put_abi(element));
+    if (!element || winrt::get_class_name(element) != L"Taskbar.TaskbarFrame") {
+        return nullptr;
+    }
+    return element;
+}
+
+TaskbarFrame_OnPointer_t TaskbarFrame_OnPointerMoved_Original;
+int WINAPI TaskbarFrame_OnPointerMoved_Hook(void* pThis, void* pArgs) {
+    int result = TaskbarFrame_OnPointerMoved_Original(pThis, pArgs);
+    if (g_unloading) return result;
+    try {
+        if (auto frame = TaskbarFrameFromOverrides(pThis)) {
+            Input::PointerRoutedEventArgs args{nullptr};
+            ((IUnknown*)pArgs)
+                ->QueryInterface(winrt::guid_of<Input::PointerRoutedEventArgs>(),
+                                 winrt::put_abi(args));
+            if (args) dockfx::OnPointerMoved(frame, args);
+        }
+    } catch (...) {
+    }
+    return result;
+}
+
+TaskbarFrame_OnPointer_t TaskbarFrame_OnPointerExited_Original;
+int WINAPI TaskbarFrame_OnPointerExited_Hook(void* pThis, void* pArgs) {
+    int result = TaskbarFrame_OnPointerExited_Original(pThis, pArgs);
+    if (g_unloading) return result;
+    try {
+        if (TaskbarFrameFromOverrides(pThis)) dockfx::OnPointerExited();
+    } catch (...) {
+    }
+    return result;
+}
+
 TaskbarFrame_MeasureOverride_t TaskbarFrame_MeasureOverride_Original;
 int WINAPI TaskbarFrame_MeasureOverride_Hook(
     void* pThis,
@@ -13203,7 +14434,8 @@ void LoadSettings() {
         taskbarHeight = macdock::GetInt(L"dockHeight") +
                         macdock::GetInt(L"dockBottom") + 2;
     }
-    g_settings.taskbarHeight = px(taskbarHeight > 0 ? taskbarHeight : 48);
+    g_settings.taskbarHeight =
+        px(taskbarHeight > 0 ? taskbarHeight : 48) + macdock::MagnifyHeadroom();
     int nativeIconSize = macdock::GetInt(L"nativeIconSize");
     g_settings.iconSize = px(nativeIconSize > 0 ? nativeIconSize : 24);
     int buttonWidth = macdock::GetInt(L"buttonWidth");
@@ -13551,6 +14783,18 @@ bool HookTaskbarViewDllSymbols(HMODULE module,
                 {LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::Taskbar::implementation::TaskbarFrame,struct winrt::Windows::UI::Xaml::IFrameworkElementOverrides>::MeasureOverride(struct winrt::Windows::Foundation::Size,struct winrt::Windows::Foundation::Size *))"},
                 &TaskbarFrame_MeasureOverride_Original,
                 TaskbarFrame_MeasureOverride_Hook,
+            },
+            {
+                {LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::Taskbar::implementation::TaskbarFrame,struct winrt::Windows::UI::Xaml::Controls::IControlOverrides>::OnPointerMoved(void *))"},
+                &TaskbarFrame_OnPointerMoved_Original,
+                TaskbarFrame_OnPointerMoved_Hook,
+                true,
+            },
+            {
+                {LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::Taskbar::implementation::TaskbarFrame,struct winrt::Windows::UI::Xaml::Controls::IControlOverrides>::OnPointerExited(void *))"},
+                &TaskbarFrame_OnPointerExited_Original,
+                TaskbarFrame_OnPointerExited_Hook,
+                true,
             },
             {
                 {LR"(public: struct winrt::Taskbar::implementation::TaskbarFrameMetrics __cdecl winrt::Taskbar::implementation::TaskbarFrame::GetMetrics(void)const )"},
@@ -14636,6 +15880,8 @@ void Wh_ModAfterInit() {
 void Wh_ModBeforeUninit() {
     Wh_Log(L">");
 
+    dockfx::g_stopping = true;
+
     taskbarheight::BeforeUninit();
 }
 
@@ -14692,6 +15938,8 @@ void Wh_ModUninit() {
             hXamlHostWnd, [](PVOID) { UninitializeForCurrentThread(); },
             nullptr);
     }
+
+    dockfx::Shutdown();
 }
 
 void Wh_ModSettingsChanged() {
@@ -14892,8 +16140,8 @@ struct NavPage {
 const NavPage kPages[] = {
     {L"\uE713", L"Allgemein", L"General"},   {L"\uE771", L"Aussehen", L"Appearance"},
     {L"\uE8B9", L"Icons", L"Icons"},         {L"\uE8F1", L"Icon-Sets", L"Icon sets"},
-    {L"\uE91F", L"Punkt", L"Indicator"},     {L"\uE9E9", L"Erweitert", L"Advanced"},
-    {L"\uE946", L"Info", L"About"}};
+    {L"\uE71E", L"Effekte", L"Effects"},     {L"\uE91F", L"Punkt", L"Indicator"},
+    {L"\uE9E9", L"Erweitert", L"Advanced"},  {L"\uE946", L"Info", L"About"}};
 constexpr int kIconSetPage = 3;
 constexpr int kPageCount = ARRAYSIZE(kPages);
 
@@ -14930,18 +16178,18 @@ void DefineRows() {
     AddRow(0, R_BUTTON, L"Alle Werte dieser Position auf Standard",
            L"Reset all values of this position", nullptr, 0, 0, L"", ID_RESET);
     // Advanced (dock sizes and spacing)
-    AddRow(5, R_SECTION, L"Dock-Maße und Abstände", L"Dock sizes and spacing");
-    AddRow(5, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
-    AddRow(5, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
-    AddRow(5, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
+    AddRow(6, R_SECTION, L"Dock-Maße und Abstände", L"Dock sizes and spacing");
+    AddRow(6, R_SLIDER, L"Höhe", L"Height", L"dockHeight", 30, 90, L"px");
+    AddRow(6, R_SLIDER, L"Eckenradius", L"Corner radius", L"cornerRadius", 0, 40, L"px");
+    AddRow(6, R_SLIDER, L"Innenabstand an den Enden", L"Padding at the ends", L"paddingX", 0,
            30, L"px");
-    AddRow(5, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
+    AddRow(6, R_SLIDER, L"Abstand zum Bildschirmrand", L"Distance to screen edge",
            L"dockBottom", 0, 30, L"px");
-    AddRow(5, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
-    AddRow(5, R_SECTION, L"Taskleiste", L"Taskbar");
-    AddRow(5, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
+    AddRow(6, R_SLIDER, L"Unschärfe (Blur)", L"Blur", L"blurAmount", 0, 30, L"");
+    AddRow(6, R_SECTION, L"Taskleiste", L"Taskbar");
+    AddRow(6, R_TOGGLE, L"Taskleiste an das Dock anpassen", L"Fit taskbar to the dock",
            L"autoTaskbarHeight");
-    AddRow(5, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
+    AddRow(6, R_SLIDER, L"Taskleisten-Höhe (wenn nicht angepasst)",
            L"Taskbar height (when not fitted)", L"taskbarHeight", 40, 100, L"px");
     // Appearance
     AddRow(1, R_SECTION, L"Modus", L"Mode");
@@ -14985,26 +16233,47 @@ void DefineRows() {
     AddRow(3, R_FOLDER, L"Icon-Ordner", L"Icon folder", nullptr, 0, 0, L"", ID_FOLDER);
     AddRow(3, R_BUTTON, L"Gewählte Icons dieses Sets entfernen",
            L"Remove the chosen icons of this set", nullptr, 0, 0, L"", ID_RESETICONS);
+    // Effects
+    AddRow(4, R_SECTION, L"Vergrößerung", L"Magnification");
+    AddRow(4, R_TOGGLE, L"Icons unter der Maus vergrößern", L"Magnify icons under the pointer",
+           L"magnification");
+    AddRow(4, R_SLIDER, L"Größe", L"Size", L"magnificationScale", 100, 200, L"%");
+    AddRow(4, R_SLIDER, L"Reichweite", L"Range", L"magnificationRange", 1, 8, L"Icons");
+    AddRow(4, R_SLIDER, L"Animation", L"Animation", L"magnificationSpeed", 0, 400, L"ms");
+    AddRow(4, R_NOTE,
+           L"Über dem Dock bleibt dafür etwas Platz frei, maximierte Fenster enden also etwas "
+           L"höher. Den Mod „Taskbar Dock Animation Plus“ bitte ausschalten.",
+           L"The taskbar keeps a little room above the dock for it, so maximized windows end a "
+           L"bit higher. Please turn off the \"Taskbar Dock Animation Plus\" mod.");
+    AddRow(4, R_SECTION, L"Papierkorb", L"Recycle Bin");
+    AddRow(4, R_TOGGLE, L"Papierkorb am Ende des Docks", L"Recycle Bin at the end of the dock",
+           L"showTrash");
+    AddRow(4, R_TOGGLE, L"Trennstrich davor", L"Divider before it", L"trashDivider");
+    AddRow(4, R_NOTE,
+           L"Klick öffnet ihn, Dateien draufziehen löscht sie, Rechtsklick → Leeren. Icons: "
+           L"„trash (empty).png“ und „trash (full).png“ im Icon-Ordner des aktiven Sets.",
+           L"Click opens it, drop files to delete them, right-click → Empty. Icons: "
+           L"\"trash (empty).png\" and \"trash (full).png\" in the active set's icon folder.");
     // Indicator
-    AddRow(4, R_SECTION, L"Punkt", L"Dot");
-    AddRow(4, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
-    AddRow(4, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
+    AddRow(5, R_SECTION, L"Punkt", L"Dot");
+    AddRow(5, R_SLIDER, L"Größe", L"Size", L"dotSize", 2, 10, L"px");
+    AddRow(5, R_SLIDER, L"Abstand zum Icon", L"Distance to the icon", L"dotOffset", -8, 10,
            L"px");
-    AddRow(4, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
+    AddRow(5, R_SLIDER, L"Versatz links/rechts", L"Offset left/right", L"dotOffsetX", -20, 20,
            L"px");
-    AddRow(4, R_SECTION, L"Farben", L"Colors");
-    AddRow(4, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
-    AddRow(4, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
-    AddRow(4, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
+    AddRow(5, R_SECTION, L"Farben", L"Colors");
+    AddRow(5, R_COLOR, L"Aktive App", L"Active app", L"dotActiveColor");
+    AddRow(5, R_COLOR, L"App im Hintergrund", L"Background app", L"dotInactiveColor");
+    AddRow(5, R_COLOR, L"App braucht Aufmerksamkeit", L"App needs attention",
            L"dotAttentionColor");
     // About
-    AddRow(6, R_SECTION, L"macOS Dock", L"macOS Dock");
-    AddRow(6, R_NOTE,
+    AddRow(7, R_SECTION, L"macOS Dock", L"macOS Dock");
+    AddRow(7, R_NOTE,
            L"Verwandelt die Windows-11-Taskleiste in ein macOS-Dock. Alle Änderungen werden "
            L"sofort übernommen und gespeichert.",
            L"Turns the Windows 11 taskbar into a macOS dock. All changes apply and save "
            L"immediately.");
-    AddRow(6, R_NOTE,
+    AddRow(7, R_NOTE,
            L"Dieses Fenster öffnest du mit einem Rechtsklick auf ein Icon im Dock → "
            L"„Dock-Einstellungen …“.",
            L"Open this window by right-clicking an icon in the dock → \"Dock settings …\".");

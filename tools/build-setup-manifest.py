@@ -25,9 +25,7 @@ CATALOG_MODS = {
         "allResourceRedirect": 1,
     },
     "custom-corner-radius": {"radius": 12, "smallRadius": 6},
-    "taskbar-dock-animation-plus": {"AnimationType": 0, "MaxScale": 110, "EffectRadius": 100},
     "windows-11-file-explorer-styler": {"theme": "Minimal Explorer11"},
-    "taskbar-icon-separators": {},
     "center-new-windows": {},
     "invisible-borders": {},
     "monitor-rounded-edges": {},
@@ -48,7 +46,8 @@ LOCAL_MODS = {
 }
 
 # Mods that conflict with macOS Dock and get disabled if installed.
-CONFLICTING_MODS = ["windows-11-taskbar-styler", "taskbar-icon-size", "taskbar-dock-animation", "macos-minimize-animation"]
+# macOS Dock has its own magnification and Recycle Bin divider since 2.2.
+CONFLICTING_MODS = ["windows-11-taskbar-styler", "taskbar-icon-size", "taskbar-dock-animation", "macos-minimize-animation", "taskbar-dock-animation-plus", "taskbar-icon-separators"]
 
 
 class JsonLikeLoader(yaml.SafeLoader):

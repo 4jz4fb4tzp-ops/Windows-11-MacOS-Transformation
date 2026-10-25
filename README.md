@@ -54,7 +54,7 @@ The setup does everything else automatically:
   Tray Toggle)
 - disables mods that conflict with the dock, centers the taskbar and hides
   search, task view and widgets
-- creates the Trash shortcut and restarts Windhawk and Explorer
+- restarts Windhawk and Explorer
 
 Compiling the custom mods takes a few minutes. Mods that are already installed
 keep their settings; turn on **Reset settings** in `Setup.exe` (or run
@@ -110,9 +110,7 @@ the settings under **Details → Settings**.
 |---|---|
 | **Resource Redirect** | *Icon theme*: `macOS Blue (by niivu)`, *Disable folder thumbnails*: on, *Redirect all loaded resources*: on |
 | **Custom Window Corner Radius** | *Corner radius*: `12`, *Small corner radius*: `6` |
-| **Taskbar Dock Animation Plus** | *Animation curve*: `0`, *Maximum scale*: `110`, *Effect radius*: `100`, rest default |
 | **Windows 11 File Explorer Styler** | *Theme*: `Minimal Explorer11`, rest default |
-| **Taskbar Icon Separators** | Defaults are fine |
 | **Center New Windows** | Defaults are fine |
 | **Invisible Window Borders** | Defaults are fine |
 | **Monitor Rounded Edges** | Defaults are fine |
@@ -165,16 +163,22 @@ dock at the bottom and on the left/right keep separate settings; the window
 always edits the current position. All changes apply immediately, no admin
 prompt needed.
 
-## 7. Trash in the dock
+## 7. Magnification and Recycle Bin
 
-1. Double-click `Files\Trash.cmd`. It creates `Trash.lnk` and opens the folder
-   with it selected.
-2. Right-click `Trash.lnk` → **Show more options** → **Pin to taskbar**.
-3. Drag it to the far right of your pinned apps.
+Both are built into macOS Dock (since 2.2); turn them on or off in the dock
+settings window under **Effects**.
 
-Windows 11 does not allow scripts to pin items automatically, so step 2 has to
-be done by hand. Apps that are running but not pinned always appear to the
-right of the Trash; pin the apps you use regularly to keep it at the end.
+- **Magnification:** icons grow under the pointer and push the others aside,
+  like on a Mac. Size, range and animation speed are adjustable. The taskbar
+  keeps a little room above the dock for it, so maximized windows end a bit
+  higher. Don't use *Taskbar Dock Animation Plus* at the same time.
+- **Recycle Bin:** sits at the end of the dock after a divider, shows whether
+  it's full, opens on click, deletes files you drop on it (they can be
+  restored) and empties with right-click. Its icon comes from the icon folder
+  of the active icon set: `trash (empty).png` and `trash (full).png`; the
+  *Windows* set (or a missing file) shows the Windows Recycle Bin. The old
+  pinned `Trash.lnk` is hidden automatically, and *Taskbar Icon Separators* is
+  no longer needed.
 
 ## Custom icons for other apps
 
@@ -195,6 +199,7 @@ with:
   
 ## Changelog
 
+- **New (macOS Dock 2.2):** built-in macOS magnification (the dock grows with the icons) and a real Recycle Bin at the end of the dock with a divider: full/empty icon, drop files to delete them, right-click to empty. Both are adapted from the *MacOS Style Dock* mod by Zach Vaughn. The setup no longer installs *Taskbar Dock Animation Plus* and *Taskbar Icon Separators* and turns them off.
 - **New (macOS Dock 2.1):** icon sets. Switch between **macOS** (your chosen icons), **Windows** (original icons) and your own sets, e.g. "Minecraft", with right-click → **Icon set** or in the settings window under **Icon sets**. Every set keeps its own icons and icon folder (new sets get `Documents\MacOs-Dock\Icon-Sets\<name>`).
 - **Fixed (macOS Dock 2.0.7):** after moving the dock back to the bottom, opened apps that aren't pinned could keep a turned icon.
 - **Fixed (macOS Dock 2.0.6):** with the dock on the left or right, an opened app that isn't pinned could be cut off at the top and bottom (it reused the short button of the separator).
@@ -236,6 +241,8 @@ This is an independent fan project. It is not affiliated with, sponsored or endo
 - **macOS Dock** is based on *Windows 11 Taskbar Styler* and *Taskbar height and
   icon size* by m417z (GPL v3). The `WindhawkBlur` brush is based on code from
   the TranslucentTB project.
+  Its magnification and Recycle Bin are adapted from *MacOS Style Dock* by Zach
+  Vaughn (GPL v3).
 - **Resource Redirect**, **Custom Window Corner Radius** by m417z (Windhawk
   catalog).
 - **MacOS Minimize Animation (Dock left/right)** is a fork of *MacOS Minimize

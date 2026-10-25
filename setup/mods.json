@@ -42,33 +42,6 @@
       "source": "catalog"
     },
     {
-      "id": "taskbar-dock-animation-plus",
-      "name": "Taskbar Dock Animation Plus",
-      "version": "2.0.1",
-      "include": [
-        "explorer.exe"
-      ],
-      "exclude": [],
-      "architecture": [
-        "x86-64"
-      ],
-      "compilerOptions": "-lole32 -loleaut32 -lruntimeobject -lshcore -lwindowsapp -luser32",
-      "settings": {
-        "AnimationType": 0,
-        "MaxScale": 110,
-        "EffectRadius": 100,
-        "SpacingFactor": 50,
-        "BounceDelay": 500,
-        "FocusDuration": 150,
-        "DisableVerticalBounce": 0,
-        "TaskbarLabelsMode": 0,
-        "ExcludeSystemButtonsMode": 0,
-        "LerpSpeed": 60,
-        "DisableBounce": 0
-      },
-      "source": "catalog"
-    },
-    {
       "id": "windows-11-file-explorer-styler",
       "name": "Windows 11 File Explorer Styler",
       "version": "1.7",
@@ -90,28 +63,6 @@
         "themeResourceVariables[0]": "",
         "explorerFrameContainerHeight": 0,
         "xamlDiagnosticsHandling": "alert"
-      },
-      "source": "catalog"
-    },
-    {
-      "id": "taskbar-icon-separators",
-      "name": "Taskbar Icon Separators",
-      "version": "1.0.33",
-      "include": [
-        "explorer.exe"
-      ],
-      "exclude": [],
-      "architecture": [
-        "x86-64"
-      ],
-      "compilerOptions": "-lole32 -loleaut32 -lruntimeobject -luuid -lshell32 -lpropsys -lshlwapi -lwindowscodecs",
-      "settings": {
-        "width": 20,
-        "interactionMode": "contextMenu",
-        "iconRotation": 0,
-        "iconBrightness": 168,
-        "iconAlpha": 173,
-        "customIcon": ""
       },
       "source": "catalog"
     },
@@ -218,7 +169,7 @@
     {
       "id": "macos-dock-taskbar",
       "name": "macOS Dock",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "include": [
         "explorer.exe"
       ],
@@ -251,6 +202,12 @@
         "dotActiveColor": "#FFFFFF",
         "dotInactiveColor": "#C2C2C2",
         "dotAttentionColor": "#000000",
+        "magnification": 1,
+        "magnificationScale": 150,
+        "magnificationRange": 2,
+        "magnificationSpeed": 100,
+        "showTrash": 1,
+        "trashDivider": 1,
         "hideStart": 1,
         "hideTray": 1,
         "hideHover": 1,
@@ -264,8 +221,8 @@
         "xamlDiagnosticsHandling": "alert"
       },
       "source": "local",
-      "file": "macos-dock-taskbar.wh.cpp",
       "optional": false,
+      "file": "macos-dock-taskbar.wh.cpp",
       "question": null
     },
     {
@@ -376,6 +333,8 @@
     "windows-11-taskbar-styler",
     "taskbar-icon-size",
     "taskbar-dock-animation",
-    "macos-minimize-animation"
+    "macos-minimize-animation",
+    "taskbar-dock-animation-plus",
+    "taskbar-icon-separators"
   ]
 }
