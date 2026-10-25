@@ -2,7 +2,7 @@
 // @id              macos-traffic-lights-right
 // @name            macOS Traffic Lights
 // @description     macOS traffic light buttons on the right of the title bar, replacing the native caption buttons – Explorer included
-// @version         3.1
+// @version         3.2
 // @author          Okan
 // @include         *
 // @exclude         dwm.exe
@@ -126,6 +126,10 @@ struct WinState {
     // that draw their own buttons without telling Windows (Discord) keep them either way,
     // so they're painted over instead.
     bool systemButtons = false;
+    // For such apps, the height of their title bar, worked out from where their button symbols
+    // sit (buttons are centred on them), so the cover reaches the buttons' bottom edge and
+    // none of them can be clicked below it. 0 until measured.
+    int appCaptionH = 0;
     // Child windows that answer for the caption buttons (apps that draw their own title bar),
     // subclassed so their buttons stop being buttons too.
     std::vector<HWND> buttonChildren;
@@ -263,6 +267,8 @@ static bool ComputeGeometry(WinState* s) {
         int frameTop = zoomed ? top : fr.top;
         out.left = std::min<LONG>(out.left, wr.right - s->nativeWidth);
         out.bottom = std::max<LONG>(out.bottom, frameTop + s->nativeHeight);
+    } else if (s->appCaptionH > 0) {
+        out.bottom = std::max<LONG>(out.bottom, top + s->appCaptionH);
     }
     s->nativeLeft = out.left;
     s->nativeCells = cells;
@@ -543,6 +549,8 @@ static bool CaptureBesideOverlay(const RECT& ov, std::vector<DWORD>& out) {
     return true;
 }
 
+static void ScheduleSample(WinState* s, UINT ms, bool probe = true);
+
 // Reads what the title bar looks like under the overlay. The overlay is excluded from screen
 // capture only for the moment of the copy, so screenshots and recordings still show the lights.
 // probe: also measure the native buttons again (shown, resized, activated), not for the
@@ -601,8 +609,24 @@ static bool SampleBackground(WinState* s, bool probe = true) {
             }
         } else {
             // The app draws its buttons without reporting where (Discord): their size and
-            // layout are its own, so the whole corner is searched.
+            // layout are its own, so the whole corner is searched, and its title bar height
+            // taken from where the symbols sit.
             mark(0, 0, w, h);
+            long long sumY = 0, n = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    if (changed[y * w + x]) {
+                        sumY += y;
+                        n++;
+                    }
+            if (n >= (int)(20 * s->scale)) {
+                int captionH = (int)(2.0 * sumY / n + 0.5);
+                captionH = ClampInt(captionH, (int)(24 * s->scale), (int)(64 * s->scale));
+                if (abs(captionH - s->appCaptionH) > (int)(2 * s->scale)) {
+                    s->appCaptionH = captionH;
+                    ScheduleSample(s, 50, false);  // again, with the cover at its new size
+                }
+            }
         }
         for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++) {
@@ -878,7 +902,7 @@ static void Render(WinState* s, bool force = false) {
 // Samples again after ms, then every 80 ms while the sample keeps changing: right after an
 // event the screen can still show an animation (a window opening, mica fading between active
 // and inactive) instead of the settled title bar.
-static void ScheduleSample(WinState* s, UINT ms, bool probe = true) {
+static void ScheduleSample(WinState* s, UINT ms, bool probe) {
     if (!s->overlay) return;
     s->settle = 12;
     s->probePending = s->probePending || probe;
