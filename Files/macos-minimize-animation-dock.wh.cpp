@@ -301,6 +301,26 @@ SetWindowPos_t SetWindowPos_Original;
 // Shared Direct2D factory (multi-threaded: several worker threads may render at
 // once). Ported from Potassiumuncher's genie engine.
 ID2D1Factory* g_d2dFactory = nullptr;
+std::once_flag g_d2dFactoryOnce;
+
+// Created on the first animation rather than in Wh_ModInit: under @include * the
+// mod loads into every process, and most of them never animate a window, so
+// d2d1.dll is only loaded (System32 only, see the Shcore note below) where it's
+// needed. Never unloaded once loaded.
+static ID2D1Factory* MacGenieD2DFactory() {
+    std::call_once(g_d2dFactoryOnce, [] {
+        HMODULE d2d = LoadLibraryExW(L"d2d1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!d2d) return;
+        using D2D1CreateFactory_t = HRESULT(WINAPI*)(D2D1_FACTORY_TYPE, REFIID,
+                                                     const D2D1_FACTORY_OPTIONS*, void**);
+        auto create = (D2D1CreateFactory_t)GetProcAddress(d2d, "D2D1CreateFactory");
+        if (!create || FAILED(create(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory),
+                                     nullptr, reinterpret_cast<void**>(&g_d2dFactory)))) {
+            g_d2dFactory = nullptr;
+        }
+    });
+    return g_d2dFactory;
+}
 
 struct MacGenieAnimData {
     HWND hRealWnd;
@@ -692,8 +712,36 @@ int GetTaskbarButtonX(HWND hWndApp, int fallbackX, HMONITOR hMon, bool vertical 
                         pAutomation->CreateOrCondition(pButtonCond, pListItemCond, &pOrCond);
                     }
 
+                    // Name and bounds come back with the search in one cross-process
+                    // call. Read one by one they cost two calls into Explorer per
+                    // taskbar element, all while the app's UI thread waits to minimize.
+                    IUIAutomationCacheRequest* pCache = nullptr;
+                    if (SUCCEEDED(pAutomation->CreateCacheRequest(&pCache)) && pCache &&
+                        (FAILED(pCache->AddProperty(UIA_NamePropertyId)) ||
+                         FAILED(pCache->AddProperty(UIA_BoundingRectanglePropertyId)))) {
+                        pCache->Release();
+                        pCache = nullptr;
+                    }
+
                     IUIAutomationElementArray* pArray = nullptr;
-                    if (pOrCond && SUCCEEDED(pTrayElement->FindAll(TreeScope_Descendants, pOrCond, &pArray)) && pArray) {
+                    bool cached = false;
+                    if (pOrCond && pCache &&
+                        SUCCEEDED(pTrayElement->FindAllBuildCache(TreeScope_Descendants, pOrCond,
+                                                                  pCache, &pArray)) && pArray) {
+                        cached = true;
+                    } else if (pOrCond) {
+                        pArray = nullptr;
+                        pTrayElement->FindAll(TreeScope_Descendants, pOrCond, &pArray);
+                    }
+                    if (pCache) pCache->Release();
+                    auto getName = [cached](IUIAutomationElement* e, BSTR* out) {
+                        return cached ? e->get_CachedName(out) : e->get_CurrentName(out);
+                    };
+                    auto getRect = [cached](IUIAutomationElement* e, RECT* out) {
+                        return cached ? e->get_CachedBoundingRectangle(out)
+                                      : e->get_CurrentBoundingRectangle(out);
+                    };
+                    if (pArray) {
                         int length = 0;
                         pArray->get_Length(&length);
 
@@ -709,7 +757,7 @@ int GetTaskbarButtonX(HWND hWndApp, int fallbackX, HMONITOR hMon, bool vertical 
                             IUIAutomationElement* pItem = nullptr;
                             if (SUCCEEDED(pArray->GetElement(i, &pItem)) && pItem) {
                                 BSTR name;
-                                if (SUCCEEDED(pItem->get_CurrentName(&name)) && name) {
+                                if (SUCCEEDED(getName(pItem, &name)) && name) {
                                     std::wstring uiaNameLower = name;
                                     std::transform(uiaNameLower.begin(), uiaNameLower.end(), uiaNameLower.begin(), ::towlower);
 
@@ -742,7 +790,7 @@ int GetTaskbarButtonX(HWND hWndApp, int fallbackX, HMONITOR hMon, bool vertical 
 
                                         if (score > bestScore) {
                                             RECT bRect;
-                                            if (SUCCEEDED(pItem->get_CurrentBoundingRectangle(&bRect))) {
+                                            if (SUCCEEDED(getRect(pItem, &bRect))) {
                                                 if (vertical) {
                                                     if (bRect.bottom > bRect.top && bRect.top < monBottom - 50) {
                                                         bestScore = score;
@@ -1046,7 +1094,7 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
     ID2D1Bitmap* snapshotBmp = nullptr;
     ID2D1BitmapBrush* bmpBrush = nullptr;
 
-    if (g_d2dFactory) {
+    if (MacGenieD2DFactory()) {
         D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
             D2D1_RENDER_TARGET_TYPE_DEFAULT,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
@@ -1306,10 +1354,25 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
             // the window would vanish a few frames before the genie appears.
             // One DwmFlush here guarantees it is composed on screen before the
             // handoff; every subsequent frame is capped only by the pacer below.
+            bool flushed = false;
             if (firstFrame && !degenerate) {
                 DwmFlush();
+                flushed = true;
                 firstFrame = FALSE;
                 if (data->hFirstFrameShown) SetEvent(data->hFirstFrameShown);
+            }
+
+            LARGE_INTEGER qpcAfter;
+            QueryPerformanceCounter(&qpcAfter);
+            double spentMs = (qpcAfter.QuadPart - qpcFrameStart.QuadPart) * 1000.0 / qpcFreq.QuadPart;
+
+            // A frame that takes longer than a whole refresh interval drops frames,
+            // which on a slow machine makes the genie stutter. Every tile costs a
+            // geometry and a masked fill, so lower the mesh resolution until a
+            // frame fits. The frame that waited in DwmFlush doesn't count.
+            if (!flushed && spentMs > 2.0 * frameIntervalMs && xTiles > TILE_COUNT_MIN) {
+                xTiles = yTiles = (xTiles * 3 / 4 > TILE_COUNT_MIN) ? xTiles * 3 / 4 : TILE_COUNT_MIN;
+                grid.assign(yTiles + 1, std::vector<D2D1_POINT_2F>(xTiles + 1));
             }
 
             // Rate-limit to ~2x refresh so we never busy-spin. The deadline is
@@ -1319,9 +1382,6 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
             // Capped wait keeps the g_unloading check responsive. When a frame
             // overruns its budget, SwitchToThread still yields the quantum.
             if (hFrameTimer) {
-                LARGE_INTEGER qpcAfter;
-                QueryPerformanceCounter(&qpcAfter);
-                double spentMs = (qpcAfter.QuadPart - qpcFrameStart.QuadPart) * 1000.0 / qpcFreq.QuadPart;
                 double waitMs = frameIntervalMs - spentMs;
                 if (waitMs > 0.1) {
                     LARGE_INTEGER due;
@@ -2511,12 +2571,8 @@ DWORD WINAPI MacGenieLaunchThread(LPVOID lpParam) {
 BOOL Wh_ModInit() {
     MacGenieLoadSettings();
 
-    // Direct2D factory for the genie renderer (Potassiumuncher's engine). Released
-    // in Wh_ModUninit. If it fails, workers skip the animation gracefully.
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED,
-                                   __uuidof(ID2D1Factory),
-                                   reinterpret_cast<void**>(&g_d2dFactory));
-    if (FAILED(hr)) g_d2dFactory = nullptr;
+    // The Direct2D factory for the genie renderer (Potassiumuncher's engine) is
+    // created on first use, see MacGenieD2DFactory. Released in Wh_ModUninit.
 
     Wh_SetFunctionHook((void*)DefWindowProcW, (void*)DefWindowProcW_Hook, (void**)&DefWindowProcW_Original);
     Wh_SetFunctionHook((void*)ShowWindow, (void*)ShowWindow_Hook, (void**)&ShowWindow_Original);
