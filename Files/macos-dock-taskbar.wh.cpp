@@ -2,7 +2,7 @@
 // @id              macos-dock-taskbar
 // @name            macOS Dock
 // @description     Turns the Windows 11 taskbar into a macOS-style dock with custom icons, glass effect and dot indicators
-// @version         2.2.1
+// @version         2.2.2
 // @author          Okan
 // @github          https://github.com/4jz4fb4tzp-ops
 // @include         explorer.exe
@@ -10733,9 +10733,11 @@ void AddTrash(Dock& d, wxc::Grid const& root, uint32_t index) {
     float off = g_cfg.iconOffset;
     float trashFromEnd = -(g_cfg.dividerSpace + (g_cfg.trashSlot + size) / 2);
     float dividerFromEnd = -(g_cfg.dividerSpace / 2 + 0.5f);
-    // Same cross-axis shift as the icons (see "Custom app icons").
+    // Same cross-axis shift as the icons get from their margins (see
+    // "Custom app icons"): at the bottom `off` px up, on the left `off` px
+    // to the right, on the right `off` px to the left.
     float crossA = off, crossB = -off;
-    if (g_cfg.vertical && g_cfg.rightEdge) std::swap(crossA, crossB);
+    if (!g_cfg.vertical || g_cfg.rightEdge) std::swap(crossA, crossB);
 
     wxc::Grid trash;
     trash.Name(L"MacDockTrash");
