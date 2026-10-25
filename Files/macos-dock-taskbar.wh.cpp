@@ -34,6 +34,8 @@ every change immediately. Values changed there take priority over the
 * **Indicator:** dot size, position and colors for active, background and
   attention states
 * **Elements:** hide the Start button, system tray and hover background
+* **Auto-hide:** the dock slides away and comes back when the pointer
+  touches the screen edge, like on a Mac
 * **Position:** follows the Windows taskbar position (bottom, left or right,
   under Settings → Personalization → Taskbar → Taskbar behaviors)
 * **Apps:** one or more App IDs per app and a PNG file from the icon folder
@@ -199,6 +201,11 @@ mod by Zach Vaughn (GPL v3).
       $name: Styles
   $name: Extra styles (advanced)
   $description: Same format as Windows 11 Taskbar Styler. Applied in addition to the settings above.
+- autoHide: false
+  $name: Automatically hide the dock
+  $description: >-
+    The dock slides away and comes back when the pointer touches the screen
+    edge. Maximized windows then use the whole screen.
 - clickThroughTaskbar: true
   $name: Click-through empty taskbar areas
   $description: Clicks next to the dock go to the windows behind it.
@@ -7281,6 +7288,7 @@ namespace macdock {
 extern std::atomic<int> g_cachedEdge;
 bool IsVerticalEdge(UINT edge);
 int MagnifyHeadroom();
+bool AutoHideOn();
 }
 
 void UpdateClickThroughRegion(ClickThroughTaskbarState& state) {
@@ -7492,6 +7500,23 @@ void UpdateClickThroughRegion(ClickThroughTaskbarState& state) {
             CombineRgn(rgn, rgn, trayRgn, RGN_OR);
             DeleteObject(trayRgn);
             UnionRect(&rgnBox, &rgnBox, &st);
+        }
+    }
+
+    // Auto-hide: a hidden taskbar leaves only a thin strip of its inner edge
+    // on screen, and the pointer has to reach it to bring the dock back. That
+    // strip is room above the dock, outside the region, so add it along the
+    // whole edge.
+    if (macdock::AutoHideOn()) {
+        UINT edge = macdock::g_cachedEdge;
+        int px = (int)std::lround(2 * scale) + 1;
+        RECT strip = !macdock::IsVerticalEdge(edge) ? RECT{0, 0, tlWidth, px}
+                     : edge == ABE_RIGHT            ? RECT{0, 0, px, tlHeight}
+                                                    : RECT{tlWidth - px, 0, tlWidth, tlHeight};
+        if (HRGN stripRgn = CreateRectRgn(strip.left, strip.top, strip.right, strip.bottom)) {
+            CombineRgn(rgn, rgn, stripRgn, RGN_OR);
+            DeleteObject(stripRgn);
+            UnionRect(&rgnBox, &rgnBox, &strip);
         }
     }
 
@@ -9200,7 +9225,7 @@ static const wchar_t* const kProfileIntKeys[] = {
     L"dotSize",      L"dotOffset",         L"dotOffsetX",    L"hideStart",
     L"hideTray",     L"hideHover",         L"clickThroughTaskbar", L"magnification",
     L"magnificationScale", L"magnificationRange", L"magnificationSpeed", L"showTrash",
-    L"trashDivider"};
+    L"trashDivider", L"autoHide"};
 static const wchar_t* const kProfileStrKeys[] = {
     L"appearance",     L"tintColor",        L"edgeColor",
     L"darkTintColor",  L"darkEdgeColor",    L"dotActiveColor",
@@ -9349,7 +9374,21 @@ void DeleteIconSet(const std::wstring& id) {
     if (ActiveIconSet() == L"macos") SetActiveIconSet(L"macos");
 }
 
-int GetIntFor(bool side, const std::wstring& key) {
+// The values are read on hot paths, such as layout passes and every taskbar
+// button, and each read is a storage lookup, often followed by a settings
+// lookup. They only change through the setters below and on a reload, which
+// clear the cache. The icon folder isn't cached: it follows the active icon set.
+std::mutex g_valueCacheLock;
+std::unordered_map<std::wstring, int> g_intValueCache;
+std::unordered_map<std::wstring, std::wstring> g_strValueCache;
+
+void InvalidateValueCache() {
+    std::lock_guard<std::mutex> lock(g_valueCacheLock);
+    g_intValueCache.clear();
+    g_strValueCache.clear();
+}
+
+int ReadIntFor(bool side, const std::wstring& key) {
     if (IsProfileIntKey(key)) {
         int v = Wh_GetIntValue(ProfileName(side, key).c_str(), kNoValue);
         if (v != kNoValue) return v;
@@ -9358,7 +9397,34 @@ int GetIntFor(bool side, const std::wstring& key) {
     return Wh_GetIntSetting(key.c_str());
 }
 
+int GetIntFor(bool side, const std::wstring& key) {
+    std::wstring name = ProfileName(side, key);
+    {
+        std::lock_guard<std::mutex> lock(g_valueCacheLock);
+        if (auto it = g_intValueCache.find(name); it != g_intValueCache.end()) return it->second;
+    }
+    int v = ReadIntFor(side, key);
+    std::lock_guard<std::mutex> lock(g_valueCacheLock);
+    g_intValueCache[name] = v;
+    return v;
+}
+
+std::wstring ReadStrFor(bool side, const std::wstring& key);
+
 std::wstring GetStrFor(bool side, const std::wstring& key) {
+    if (key == L"iconFolder") return ReadStrFor(side, key);
+    std::wstring name = ProfileName(side, key);
+    {
+        std::lock_guard<std::mutex> lock(g_valueCacheLock);
+        if (auto it = g_strValueCache.find(name); it != g_strValueCache.end()) return it->second;
+    }
+    std::wstring v = ReadStrFor(side, key);
+    std::lock_guard<std::mutex> lock(g_valueCacheLock);
+    g_strValueCache[name] = v;
+    return v;
+}
+
+std::wstring ReadStrFor(bool side, const std::wstring& key) {
     if (IsProfileStrKey(key) || key == L"iconFolder") {
         // The icon folder is the same for both positions, one per icon set.
         std::wstring name =
@@ -9373,18 +9439,21 @@ std::wstring GetStrFor(bool side, const std::wstring& key) {
 
 void SetIntFor(bool side, const std::wstring& key, int value) {
     Wh_SetIntValue(ProfileName(side, key).c_str(), value);
+    InvalidateValueCache();
 }
 
 void SetStrFor(bool side, const std::wstring& key, const std::wstring& value) {
     std::wstring name =
         key == L"iconFolder" ? FolderKey(ActiveIconSet()) : ProfileName(side, key);
     Wh_SetStringValue(name.c_str(), value.c_str());
+    InvalidateValueCache();
 }
 
 // Forgets everything the settings window changed for one position.
 void ResetProfile(bool side) {
     for (auto k : kProfileIntKeys) Wh_DeleteValue(ProfileName(side, k).c_str());
     for (auto k : kProfileStrKeys) Wh_DeleteValue(ProfileName(side, k).c_str());
+    InvalidateValueCache();
 }
 
 bool CurrentIsSide() {
@@ -9579,6 +9648,10 @@ int MagnifyHeadroom() {
 
 bool TrashOn() {
     return GetInt(L"showTrash") != 0;
+}
+
+bool AutoHideOn() {
+    return GetInt(L"autoHide") != 0;
 }
 
 bool TrashDividerOn() {
@@ -10055,6 +10128,7 @@ struct Config {
     float trashSlot = 44;
     float dividerSpace = 13;
     float iconOffset = 0;
+    bool autoHide = false;
 } g_cfg;
 
 void LoadConfig() {
@@ -10075,6 +10149,7 @@ void LoadConfig() {
     g_cfg.trashSlot = (float)macdock::TrashSlot();
     g_cfg.dividerSpace = (float)macdock::TrashDividerSpace();
     g_cfg.iconOffset = (float)macdock::GetPx(L"iconOffsetY");
+    g_cfg.autoHide = macdock::AutoHideOn();
 }
 
 // The most the dock grows at each end while icons are magnified, in DIPs.
@@ -10713,7 +10788,9 @@ void ScheduleOverWindows(bool autoHide) {
 void UpdateOverWindows() {
     int pending = std::exchange(g_overWindowsPending, 0);
     if (g_stopping || !pending) return;
-    if (pending == 2) ApplyAutoHide(g_keepShown);
+    // Auto-hide is on both for the dock's own auto-hide and, kept from hiding,
+    // for the room above the dock (see g_keepShown).
+    if (pending == 2) ApplyAutoHide(g_keepShown || g_cfg.autoHide);
     UpdateAppBars();
 }
 
@@ -10828,7 +10905,9 @@ bool SetupDock(FrameworkElement const& frame) {
     root.Children().InsertAt(index, glass);
 
     // Maximized windows end right above the dock, as without magnification.
-    g_keepShown = g_cfg.magnify && macdock::MagnifyHeadroom() > 0;
+    // With the dock hiding itself they use the whole screen instead, and the
+    // taskbar is let hide.
+    g_keepShown = !g_cfg.autoHide && g_cfg.magnify && macdock::MagnifyHeadroom() > 0;
     ScheduleOverWindows(true);
 
     // The Recycle Bin and the divider go above the icons.
@@ -11993,6 +12072,18 @@ FrameworkElement FindChildByClassName(FrameworkElement element,
 }
 
 bool IsVerticalTaskbar() {
+    // Asked by hooks that run for every taskbar button and layout pass, and the
+    // query is a message round trip to the taskbar through shared memory, so the
+    // answer is kept for a moment. The taskbar only changes sides on a restart
+    // of Explorer or a reload of the dock, both of which take longer than this.
+    static std::atomic<ULONGLONG> s_lastTick{0};
+    static std::atomic<bool> s_lastValue{false};
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG last = s_lastTick;
+    if (last && now - last < 250) {
+        return s_lastValue;
+    }
+
     APPBARDATA appBarData = {
         .cbSize = sizeof(APPBARDATA),
     };
@@ -12001,7 +12092,10 @@ bool IsVerticalTaskbar() {
         return false;
     }
 
-    return appBarData.uEdge == ABE_LEFT || appBarData.uEdge == ABE_RIGHT;
+    bool vertical = appBarData.uEdge == ABE_LEFT || appBarData.uEdge == ABE_RIGHT;
+    s_lastValue = vertical;
+    s_lastTick = now;
+    return vertical;
 }
 
 void OverrideResourceDirectoryLookup(
@@ -16258,6 +16352,9 @@ void Wh_ModSettingsChanged() {
 void ReloadDock(bool settingsChanged) {
     std::lock_guard<std::mutex> lock(g_reloadMutex);
 
+    // The Windhawk settings may have changed underneath the cached values.
+    macdock::InvalidateValueCache();
+
     if (settingsChanged) {
         taskbarheight::SettingsChanged();
     }
@@ -16479,6 +16576,8 @@ void DefineRows() {
            L"hideTray");
     AddRow(0, R_TOGGLE, L"Hover-Hintergrund ausblenden", L"Hide hover background",
            L"hideHover");
+    AddRow(0, R_TOGGLE, L"Dock automatisch ausblenden", L"Automatically hide the dock",
+           L"autoHide");
     AddRow(0, R_TOGGLE, L"Klicks neben dem Dock durchlassen",
            L"Click through empty taskbar areas", L"clickThroughTaskbar");
     AddRow(0, R_SECTION, L"Zurücksetzen", L"Reset");
