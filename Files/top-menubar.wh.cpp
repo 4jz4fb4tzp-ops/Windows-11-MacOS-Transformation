@@ -5,7 +5,7 @@
 // @version         0.32.0
 // @author          Okan
 // @include         explorer.exe
-// @compilerOptions -lshell32 -lgdi32 -luser32 -lversion -lole32 -lwlanapi -liphlpapi -lcomctl32 -lcomdlg32 -ladvapi32 -ldwmapi -lgdiplus -lbthprops -luxtheme
+// @compilerOptions -lshell32 -lgdi32 -luser32 -lversion -lole32 -lwlanapi -liphlpapi -lcomctl32 -lcomdlg32 -ladvapi32 -ldwmapi -lgdiplus -lbthprops -luxtheme -ld2d1 -ldwrite
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -84,6 +84,9 @@ Scroll over the speaker to change the volume, middle-click to mute.
 #include <wincodec.h>
 #include <propsys.h>
 #include <dwmapi.h>
+#include <d2d1.h>
+#include <dwrite.h>
+#include <map>
 #include <functional>
 #include <algorithm>
 #include <cmath>
@@ -951,6 +954,173 @@ void EnsureFonts(UINT dpi) {
 }
 
 // ======================================================================
+// Text: DirectWrite statt GDI
+// ======================================================================
+// GDI rastet kleine Schrift hart aufs Pixelraster ein, das wirkt grob. DirectWrite
+// zeichnet mit Subpixel-Positionierung und weicher Graustufen-Kantenglättung, so wie
+// macOS. Die Schriften bleiben HFONTs (Größe, Stärke, Name kommen daraus), und
+// gezeichnet wird über ein D2D-DC-Render-Target in denselben DC, auf das, was schon
+// darin steht – so funktioniert das Zeichnen auf Schwarz und Weiß weiter.
+// Nur auf dem Leisten-Thread benutzt.
+ID2D1Factory* g_d2d = nullptr;
+IDWriteFactory* g_dw = nullptr;
+ID2D1DCRenderTarget* g_textRt = nullptr;
+ID2D1SolidColorBrush* g_textBrush = nullptr;
+IDWriteRenderingParams* g_textParams = nullptr;
+std::map<std::wstring, IDWriteTextFormat*> g_textFormats;
+bool g_textFailed = false;
+
+bool EnsureTextRenderer() {
+    if (g_textRt) return true;
+    if (g_textFailed) return false;
+    g_textFailed = true;
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d)) ||
+        FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   (IUnknown**)&g_dw)))
+        return false;
+    // Software: für ein paar kleine Textstücke ist das schneller als der Umweg über
+    // die Grafikkarte und zurück.
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96, 96);
+    if (FAILED(g_d2d->CreateDCRenderTarget(&props, &g_textRt))) return false;
+    // Graustufen (ClearType färbt die Kanten auf transparentem Grund), keine
+    // horizontale Rasteranpassung, leicht erhöhter Kontrast gegen zu dünne Schrift.
+    g_textRt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    if (SUCCEEDED(g_dw->CreateCustomRenderingParams(1.8f, 0.5f, 0.f, DWRITE_PIXEL_GEOMETRY_FLAT,
+                                                     DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                                                     &g_textParams)))
+        g_textRt->SetTextRenderingParams(g_textParams);
+    if (FAILED(g_textRt->CreateSolidColorBrush(D2D1::ColorF(0), &g_textBrush))) return false;
+    g_textFailed = false;
+    return true;
+}
+
+void ReleaseTextRenderer() {
+    for (auto& [k, f] : g_textFormats) f->Release();
+    g_textFormats.clear();
+    for (IUnknown** p : {(IUnknown**)&g_textBrush, (IUnknown**)&g_textParams, (IUnknown**)&g_textRt,
+                         (IUnknown**)&g_dw, (IUnknown**)&g_d2d})
+        if (*p) { (*p)->Release(); *p = nullptr; }
+    g_textFailed = false;
+}
+
+// Das DirectWrite-Gegenstück zu einem HFONT, plus dessen GDI-Oberlänge, damit die
+// Grundlinie genau dort liegt, wo GDI sie hätte (die Leiste richtet danach aus).
+struct TextFont {
+    IDWriteTextFormat* format = nullptr;
+    int ascent = 0, height = 0;
+};
+
+TextFont GetTextFont(HDC dc, HFONT f) {
+    TextFont tf;
+    LOGFONTW lf{};
+    if (!EnsureTextRenderer() || !GetObjectW(f, sizeof(lf), &lf)) return tf;
+    HGDIOBJ old = SelectObject(dc, f);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, old);
+    tf.ascent = tm.tmAscent;
+    tf.height = tm.tmHeight;
+    float em = lf.lfHeight < 0 ? (float)-lf.lfHeight : (float)(tm.tmHeight - tm.tmInternalLeading);
+    wchar_t key[LF_FACESIZE + 32];
+    swprintf(key, ARRAYSIZE(key), L"%s|%d|%d|%.2f", lf.lfFaceName, (int)lf.lfWeight,
+             (int)lf.lfItalic, em);
+    auto it = g_textFormats.find(key);
+    if (it == g_textFormats.end()) {
+        IDWriteTextFormat* fmt = nullptr;
+        if (FAILED(g_dw->CreateTextFormat(lf.lfFaceName, nullptr, (DWRITE_FONT_WEIGHT)lf.lfWeight,
+                                          lf.lfItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                                          DWRITE_FONT_STRETCH_NORMAL, em, L"", &fmt)))
+            return tf;
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        it = g_textFormats.emplace(key, fmt).first;
+    }
+    tf.format = it->second;
+    return tf;
+}
+
+IDWriteTextLayout* MakeTextLayout(const TextFont& tf, const wchar_t* s, int len, float maxW) {
+    IDWriteTextLayout* layout = nullptr;
+    if (len < 0) len = (int)wcslen(s);
+    g_dw->CreateTextLayout(s, len, tf.format, maxW, 10000.f, &layout);
+    return layout;
+}
+
+// Breite wie GetTextExtentPoint32, aber so, wie DirectWrite zeichnet.
+int SmoothTextWidth(HDC dc, const std::wstring& s, HFONT f) {
+    TextFont tf = GetTextFont(dc, f);
+    if (tf.format) {
+        if (IDWriteTextLayout* layout = MakeTextLayout(tf, s.c_str(), (int)s.size(), 100000.f)) {
+            DWRITE_TEXT_METRICS m{};
+            HRESULT hr = layout->GetMetrics(&m);
+            layout->Release();
+            if (SUCCEEDED(hr)) return (int)ceilf(m.widthIncludingTrailingWhitespace);
+        }
+    }
+    HGDIOBJ old = SelectObject(dc, f);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
+    SelectObject(dc, old);
+    return (int)sz.cx;
+}
+
+// Ersatz für DrawTextW mit DT_SINGLELINE und den Ausrichtungen, die hier vorkommen
+// (DT_LEFT/CENTER/RIGHT, DT_TOP/VCENTER/BOTTOM, DT_END_ELLIPSIS). Fällt auf GDI
+// zurück, wenn DirectWrite nicht verfügbar ist.
+void SmoothText(HDC dc, const wchar_t* s, int len, RECT r, HFONT f, COLORREF col, UINT fmt) {
+    TextFont tf = GetTextFont(dc, f);
+    IDWriteTextLayout* layout = tf.format ? MakeTextLayout(tf, s, len, (float)(r.right - r.left)) : nullptr;
+    DWRITE_LINE_METRICS line{};
+    UINT32 lines = 0;
+    if (layout && SUCCEEDED(layout->GetLineMetrics(&line, 1, &lines)) && lines >= 1) {
+        layout->SetTextAlignment((fmt & DT_RIGHT)    ? DWRITE_TEXT_ALIGNMENT_TRAILING
+                                 : (fmt & DT_CENTER) ? DWRITE_TEXT_ALIGNMENT_CENTER
+                                                     : DWRITE_TEXT_ALIGNMENT_LEADING);
+        IDWriteInlineObject* ellipsis = nullptr;
+        if ((fmt & DT_END_ELLIPSIS) && SUCCEEDED(g_dw->CreateEllipsisTrimmingSign(layout, &ellipsis))) {
+            DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            layout->SetTrimming(&trim, ellipsis);
+        }
+        // Grundlinie wie bei GDI: Zeile mit tmHeight im Rechteck platziert.
+        int top = (fmt & DT_VCENTER)  ? r.top + ((r.bottom - r.top) - tf.height) / 2
+                  : (fmt & DT_BOTTOM) ? r.bottom - tf.height
+                                      : r.top;
+        float originY = (float)(top + tf.ascent) - line.baseline;
+        // Nur den Bereich um den Text binden, mit Rand für Kantenglättung und Überhang.
+        int padX = tf.height, padY = tf.height / 2 + 2;
+        RECT bind{r.left - padX, std::min<LONG>(r.top, top) - padY, r.right + padX,
+                  std::max<LONG>(r.bottom, top + tf.height) + padY};
+        if (HBITMAP bmp = (HBITMAP)GetCurrentObject(dc, OBJ_BITMAP)) {
+            BITMAP bm{};
+            if (GetObjectW(bmp, sizeof(bm), &bm)) {
+                RECT surf{0, 0, bm.bmWidth, bm.bmHeight};
+                IntersectRect(&bind, &bind, &surf);
+            }
+        }
+        bool drawn = false;
+        if (bind.right > bind.left && bind.bottom > bind.top &&
+            SUCCEEDED(g_textRt->BindDC(dc, &bind))) {
+            g_textRt->BeginDraw();
+            g_textRt->SetTransform(D2D1::Matrix3x2F::Translation((float)-bind.left, (float)-bind.top));
+            g_textBrush->SetColor(D2D1::ColorF(GetRValue(col) / 255.f, GetGValue(col) / 255.f,
+                                               GetBValue(col) / 255.f));
+            g_textRt->DrawTextLayout(D2D1::Point2F((float)r.left, originY), layout, g_textBrush,
+                                     D2D1_DRAW_TEXT_OPTIONS_NONE);
+            drawn = SUCCEEDED(g_textRt->EndDraw());
+        }
+        if (ellipsis) ellipsis->Release();
+        layout->Release();
+        if (drawn) return;
+    } else if (layout) {
+        layout->Release();
+    }
+    SelectObject(dc, f);
+    SetTextColor(dc, col);
+    DrawTextW(dc, s, len, &r, fmt);
+}
+
+// ======================================================================
 // Blur / Acryl
 // ======================================================================
 struct ACCENTPOLICY { int AccentState; int AccentFlags; DWORD GradientColor; int AnimationId; };
@@ -958,6 +1128,12 @@ struct WINCOMPATTRDATA { int Attribute; PVOID Data; SIZE_T SizeOfData; };
 typedef BOOL(WINAPI* SetWindowCompositionAttribute_t)(HWND, WINCOMPATTRDATA*);
 
 void ApplyAccent(HWND h) {
+    // Windows 11 rundet die Ecken von Fenstern mit Blur/Acryl ab; die Leiste soll
+    // bündig an der Bildschirmkante abschließen. Die Menüs behalten ihre Rundung.
+    if (BarOf(h)) {
+        DWORD corner = 1;  // DWMWCP_DONOTROUND
+        DwmSetWindowAttribute(h, 33, &corner, sizeof(corner));  // DWMWA_WINDOW_CORNER_PREFERENCE
+    }
     static auto pSWCA = (SetWindowCompositionAttribute_t)GetProcAddress(
         GetModuleHandleW(L"user32.dll"), "SetWindowCompositionAttribute");
     if (!pSWCA) return;
@@ -1155,6 +1331,8 @@ static ULONGLONG FtToU(const FILETIME& f) {
     return ((ULONGLONG)f.dwHighDateTime << 32) | f.dwLowDateTime;
 }
 
+IAudioEndpointVolume* g_statusEndpoint = nullptr;  // nur für UpdateStatus
+
 void UpdateStatus() {
     g_tickCount++;
 
@@ -1169,8 +1347,10 @@ void UpdateStatus() {
         }
     }
 
-    // Bluetooth (alle ~2 s)
-    if ((g_s.bluetooth || MenuOpen(ACT_BLUETOOTH) || MenuOpen(ACT_CONTROL)) && (g_tickCount % 4 == 1 || MenuOpen(ACT_BLUETOOTH))) {
+    // Bluetooth (alle ~10 s, bei offenem Menü jeden Takt): die Geräteabfrage ist
+    // die langsamste hier
+    if ((g_s.bluetooth || MenuOpen(ACT_BLUETOOTH) || MenuOpen(ACT_CONTROL)) &&
+        (g_tickCount % 20 == 1 || MenuOpen(ACT_BLUETOOTH) || MenuOpen(ACT_CONTROL))) {
         BLUETOOTH_FIND_RADIO_PARAMS rp{sizeof(rp)};
         HANDLE radio = nullptr;
         HBLUETOOTH_RADIO_FIND rf = BluetoothFindFirstRadio(&rp, &radio);
@@ -1193,7 +1373,9 @@ void UpdateStatus() {
         }
     }
 
-    if (g_s.wifi || MenuOpen(ACT_WIFI) || MenuOpen(ACT_CONTROL)) {
+    // WLAN und Netzwerkstatus gehen über Dienste (RPC): alle ~2 s, bei offenem Menü
+    // jeden Takt
+    if ((g_s.wifi && g_tickCount % 4 == 1) || MenuOpen(ACT_WIFI) || MenuOpen(ACT_CONTROL)) {
         g_st.wifi = false;
         g_st.signal = 0;
         if (!g_wlan) {
@@ -1233,15 +1415,23 @@ void UpdateStatus() {
 
     if (g_s.volume || MenuOpen(ACT_VOLUME) || MenuOpen(ACT_CONTROL)) {
         g_st.hasAudio = false;
-        IAudioEndpointVolume* ep = GetEndpointVolume();
-        if (ep) {
+        // Das Standardgerät wird alle ~2 s neu geholt, dazwischen nur der Pegel
+        // gelesen, der lokal und schnell ist
+        if (g_statusEndpoint && (g_tickCount % 4 == 1 || MenuOpen(ACT_VOLUME))) {
+            g_statusEndpoint->Release();
+            g_statusEndpoint = nullptr;
+        }
+        if (!g_statusEndpoint) g_statusEndpoint = GetEndpointVolume();
+        if (IAudioEndpointVolume* ep = g_statusEndpoint) {
             BOOL m = FALSE;
             if (SUCCEEDED(ep->GetMasterVolumeLevelScalar(&g_st.volume)) &&
                 SUCCEEDED(ep->GetMute(&m))) {
                 g_st.hasAudio = true;
                 g_st.muted = m != FALSE;
+            } else {
+                ep->Release();
+                g_statusEndpoint = nullptr;
             }
-            ep->Release();
         }
     }
 
@@ -1745,20 +1935,13 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
     g_cur->hits.clear();
     int x = rc.right - pad;
 
-    auto textW = [&](const std::wstring& s, HFONT f) {
-        SelectObject(mem, f);
-        SIZE sz{};
-        GetTextExtentPoint32W(mem, s.c_str(), (int)s.size(), &sz);
-        return (int)sz.cx;
-    };
+    auto textW = [&](const std::wstring& s, HFONT f) { return SmoothTextWidth(mem, s, f); };
     auto drawText = [&](const std::wstring& s, HFONT f, COLORREF col, const wchar_t* sample = nullptr) {
         int w = textW(s, f);
         if (sample) { int sw = textW(sample, f); if (sw > w) w = sw; }
         x -= w;
         RECT r{x, 0, x + w, rc.bottom};
-        SelectObject(mem, f);
-        SetTextColor(mem, col);
-        DrawTextW(mem, s.c_str(), -1, &r, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SmoothText(mem, s.c_str(), -1, r, f, col, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     };
     auto drawGlyph = [&](wchar_t g, COLORREF col) {
         wchar_t s[2] = {g, 0};
@@ -1863,9 +2046,8 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
                         float topDigits = rc.bottom / 2.0f - capOffset(g_fontSmall);    // Ziffern mittig
                         int top = (int)std::lround((topCentered + topDigits) / 2.0f);
                         RECT pr{x, top, x + w, rc.bottom};
-                        SelectObject(mem, g_fontSmall);
-                        SetTextColor(mem, g_s.fg);
-                        DrawTextW(mem, pt.c_str(), -1, &pr, DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+                        SmoothText(mem, pt.c_str(), -1, pr, g_fontSmall, g_s.fg,
+                                   DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
                     }
                     if (g_s.batteryTime && !g_st.charging && g_st.batteryTime != (DWORD)-1) {
                         wchar_t t[16];
@@ -1988,11 +2170,9 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
         int tw = g_appName.empty() ? MulDiv(60, dpi, 96) : textW(g_appName, g_fontBold);
         if (tw > avail) tw = avail;
         if (tw > 0) {
-            SetTextColor(mem, g_s.fg);
-            SelectObject(mem, g_fontBold);
             RECT ar{leftX, 0, leftX + tw, rc.bottom};
-            DrawTextW(mem, g_appName.c_str(), -1, &ar,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            SmoothText(mem, g_appName.c_str(), -1, ar, g_fontBold, g_s.fg,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             g_cur->hits.push_back({leftX - pad / 2, leftX + tw + pad / 2, ACT_APP});
             menuX = leftX + tw + MulDiv(g_s.menuGap, dpi, 96);
         }
@@ -2006,9 +2186,8 @@ void DrawContent(HDC mem, RECT rc, COLORREF clear) {
             int tw = textW(t, g_font);
             if (menuX + tw > g_cur->statusLeft - pad) break;
             RECT tr{menuX, 0, menuX + tw, rc.bottom};
-            SelectObject(mem, g_font);
-            SetTextColor(mem, g_s.fg);
-            DrawTextW(mem, t.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SmoothText(mem, t.c_str(), -1, tr, g_font, g_s.fg,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             Hit hm{menuX - gap / 2, menuX + tw + gap / 2, ACT_APPMENU};
             hm.idx = (int)i;
             g_cur->hits.push_back(hm);
@@ -2145,12 +2324,44 @@ Action HitTest(HWND h, int px) {
     return hit ? hit->act : ACT_NONE;
 }
 
+// Alles, was der Takt an der Leiste ändern kann. Bleibt es gleich, wird nicht neu
+// gezeichnet: jedes Zeichnen malt die Leiste zweimal (für die Transparenz) und
+// schickt sie an DWM. Alles andere (Maus, Menüs, Einstellungen) zeichnet selbst.
+std::wstring BarSignature() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t date[128] = L"", time[64] = L"";
+    if (!g_s.dateFormat.empty())
+        GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, g_s.dateFormat.c_str(), date, 128, nullptr);
+    std::wstring tf = g_s.timeFormat.empty() ? L"HH:mm" : g_s.timeFormat;
+    GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, tf.c_str(), time, 64);
+    wchar_t buf[512];
+    swprintf(buf, 512, L"%s|%s|%d|%llu|%d%d%d%u%d|%d%d%d|%d%d%d|%d|%d|%d|%s|%s|%d%llu|%d%d|%p%d%d",
+             date, time, IsoWeek(st), GetTickCount64() / 60000, g_st.hasBattery, g_st.battery,
+             g_st.charging, (unsigned)(g_st.batteryTime / 60), g_st.saver, g_st.wifi, g_st.signal,
+             g_st.online, g_st.hasAudio, (int)(g_st.volume * 100 + 0.5f), g_st.muted, g_st.cpu,
+             g_st.ram, (int)g_st.diskValid, FmtRate(g_st.up).c_str(), FmtRate(g_st.down).c_str(),
+             (int)g_st.diskValid, g_st.diskFree >> 20, g_st.btRadio, g_st.btConnected,
+             (void*)g_popupBar, (int)g_popupAct, g_menuIdx);
+    return std::wstring(buf) + L"|" + g_st.kbd + L"|" + g_appName;
+}
+
 void Refresh() {
     if (g_bars.empty()) return;
     UpdateStatus();
     // Hintergrundbild jede Minute neu laden (z. B. bei Diashow)
-    if (g_s.effect == FX_CUSTOM && g_tickCount % 120 == 0) MarkWallDirty();
-    RenderAll();
+    bool force = false;
+    if (g_s.effect == FX_CUSTOM && g_tickCount % 120 == 0) {
+        MarkWallDirty();
+        force = true;
+    }
+    // Spätestens alle ~10 s trotzdem zeichnen, falls etwas nicht in der Signatur steht
+    static std::wstring lastSig;
+    std::wstring sig = BarSignature();
+    if (force || sig != lastSig || g_tickCount % 20 == 0) {
+        lastSig = std::move(sig);
+        RenderAll();
+    }
     if (g_popupAct != ACT_APPMENU) PopupRefresh();  // App-Menüs nicht ständig neu einlesen
 }
 
@@ -3385,16 +3596,13 @@ PopColors GetPopColors() {
 }
 
 void Txt(HDC dc, const std::wstring& s, RECT r, HFONT f, COLORREF col, UINT fmt) {
-    SelectObject(dc, f);
-    SetTextColor(dc, col);
-    DrawTextW(dc, s.c_str(), -1, &r, fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    SmoothText(dc, s.c_str(), -1, r, f, col,
+               fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 }
 
 void Glyph(HDC dc, wchar_t g, RECT r, HFONT f, COLORREF col) {
     wchar_t s[2] = {g, 0};
-    SelectObject(dc, f);
-    SetTextColor(dc, col);
-    DrawTextW(dc, s, 1, &r, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SmoothText(dc, s, 1, r, f, col, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 }
 
 void FillEllipse(HDC dc, RECT r, COLORREF col, COLORREF border) {
@@ -5510,6 +5718,7 @@ LRESULT CALLBACK CtrlProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         for (HFONT* f : {&g_font, &g_fontBold, &g_iconFont, &g_fontBig, &g_iconSmall, &g_fontSmall})
             if (*f) { DeleteObject(*f); *f = nullptr; }
         g_fontDpi = 0;
+        ReleaseTextRenderer();
         PostQuitMessage(0);
         return 0;
     }
@@ -5604,6 +5813,7 @@ DWORD WINAPI BarThread(LPVOID) {
     UnregisterClassW(kCtrlClass, inst);
 
     if (g_wlan) { WlanCloseHandle(g_wlan, nullptr); g_wlan = nullptr; }
+    if (g_statusEndpoint) { g_statusEndpoint->Release(); g_statusEndpoint = nullptr; }
     if (g_audioEnum) { g_audioEnum->Release(); g_audioEnum = nullptr; }
     if (g_nlm) { g_nlm->Release(); g_nlm = nullptr; }
     g_logoMask.clear();
